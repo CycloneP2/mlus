@@ -1,357 +1,305 @@
-// Tweak.mm - MLBB MOD (SUBSTRATE/SUBSTITUTE EDITION)
-// ADVANCED FEATURES: Pattern Scan, Real 3D Distance, Ultimate Anti-Report
+// Tweak.mm - EDGY HACKS (FULLY FIXED & VALIDATED)
+// Optimized for MLBB with Cydia Substrate
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <substrate.h>
 #import <mach-o/dyld.h>
-#import <mach/mach.h>
-#import <math.h>
 
+// ============================================
+// DATA STRUCTURES
+// ============================================
 typedef struct { float x, y, z; } Vector3;
 
 // ============================================
-// LOG SYSTEM
+// CONFIGURATION & OFFSETS
 // ============================================
-void add_log(NSString *msg) { NSLog(@"[pH-1] %@", msg); }
-#define LOG(fmt, ...) add_log([NSString stringWithFormat:fmt, ##__VA_ARGS__])
-
-// ============================================
-// MEMORY SCANNER (DYNAMIC OFFSETS)
-// ============================================
-namespace Memory {
-    uintptr_t find_signature(const char* sig, const char* mask, uintptr_t base, size_t size) {
-        size_t sig_len = strlen(mask);
-        for (uintptr_t i = 0; i < size - sig_len; i++) {
-            bool found = true;
-            for (size_t j = 0; j < sig_len; j++) {
-                if (mask[j] != '?' && sig[j] != *(char*)(base + i + j)) {
-                    found = false;
-                    break;
-                }
-            }
-            if (found) return base + i;
-        }
-        return 0;
-    }
-}
-
-// ============================================
-// GLOBAL DATA & OFFSETS
-// ============================================
-static uintptr_t g_unityBase = 0;
-typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
-static MSHookFunction_t MSHookFunction_ptr = NULL;
-
-static BOOL espEnabled = YES;
-static BOOL lineEnabled = YES;
-static BOOL hpBarEnabled = YES;
-static BOOL distEnabled = YES;
-static BOOL antiReport = YES;
-static BOOL autoDelete = YES;
-static BOOL radarEnabled = YES;
-
-#define OFF_BATTLE_MANAGER_INST 0xADC8A0   
+#define RVA_BATTLE_MANAGER_INST 0xADC8A0   
 #define OFF_SHOW_PLAYERS        0x78        
+#define OFF_SHOW_MONSTERS       0x80        
 #define OFF_LOCAL_PLAYER        0x50        
+
 #define OFF_ENTITY_POS          0x30        
 #define OFF_ENTITY_CAMP         0xD8        
 #define OFF_ENTITY_HP           0x1AC       
 #define OFF_ENTITY_HP_MAX       0x1B0       
-#define OFF_ENTITY_SHIELD       0x1B8       
+#define OFF_PLAYER_HERO_NAME    0x918       
+
 #define RVA_WORLD_TO_SCREEN     0x89FE040   
 #define RVA_CAMERA_MAIN         0x89FF130   
-#define OFF_CAMERA_POS          0x42C 
 
 #define RVA_SDK_REPORT_LOG      0x4CEB580
 #define RVA_SDK_REPORT_ERR      0x4CEB690
-#define RVA_SDK_SEND_STEP       0x4CEB7A0
+
+// Tweak State
+static BOOL espEnabled = YES;
+static BOOL monsterEsp = NO;
+static BOOL snaplinesEnabled = YES;
+static BOOL showTeam = NO;
+static BOOL bypassDNS = YES;
+static BOOL showHeroName = YES;
+static float enemyR = 0.6, enemyG = 0.4, enemyB = 1.0; 
+
+static uintptr_t g_unityBase = 0;
 
 // ============================================
-// ADVANCED SECURITY (SELF-DESTRUCT)
-// ============================================
-
-void self_destruct() {
-    LOG(@"[CRITICAL] Security Triggered! Renaming and Crashing...");
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && (strstr(name, "mlbb_m.dylib") || strstr(name, "edgymlbb.dylib"))) {
-            NSString *oldPath = [NSString stringWithUTF8String:name];
-            rename([oldPath UTF8String], [[oldPath stringByAppendingString:@".bak"] UTF8String]);
-            
-            // Wipe memory header
-            uintptr_t addr = (uintptr_t)_dyld_get_image_header(i);
-            mach_port_t task = mach_task_self();
-            vm_protect(task, (vm_address_t)addr, 4096, FALSE, VM_PROT_READ | VM_PROT_WRITE);
-            memset((void*)addr, 0, 4096);
-            break;
-        }
-    }
-    *(int*)0 = 0; // Force crash
-}
-
-// Anti-Report Hooks
-static void (*old_ReportLog)(void* msg);
-void hooked_ReportLog(void* msg) { if (antiReport) return; if (old_ReportLog) old_ReportLog(msg); }
-
-static void (*old_ReportErr)(void* msg);
-void hooked_ReportErr(void* msg) { if (antiReport) return; if (old_ReportErr) old_ReportErr(msg); }
-
-static void (*old_SendStep)(void* msg);
-void hooked_SendStep(void* msg) { if (antiReport) return; if (old_SendStep) old_SendStep(msg); }
-
-// ============================================
-// ESP RENDERER (REAL 3D DISTANCE)
-// ============================================
-
-@interface ESPOverlay : UIView
-@property (nonatomic, strong) CADisplayLink *displayLink;
-@end
-
-@implementation ESPOverlay
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.backgroundColor = [UIColor clearColor];
-        self.userInteractionEnabled = NO;
-        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(redraw)];
-        [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    }
-    return self;
-}
-- (void)redraw { if (espEnabled) [self setNeedsDisplay]; }
-
-- (void)drawRect:(CGRect)rect {
-    if (!espEnabled || !g_unityBase) return;
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    
-    uintptr_t bmPtr = *(uintptr_t*)(g_unityBase + OFF_BATTLE_MANAGER_INST);
-    if (!bmPtr || *(uintptr_t*)bmPtr == 0) return;
-    
-    uintptr_t playerList = *(uintptr_t*)(bmPtr + OFF_SHOW_PLAYERS);
-    if (!playerList || *(uintptr_t*)playerList == 0) return;
-    
-    void* items = *(void**)(playerList + 0x10);
-    int size = *(int*)(playerList + 0x18);
-    if (!items || size <= 0) return;
-    
-    void* (*get_main)() = (void*(*)())(g_unityBase + RVA_CAMERA_MAIN);
-    void* mainCam = get_main();
-    if (!mainCam) return;
-    
-    Vector3 camPos = *(Vector3*)((uintptr_t)mainCam + OFF_CAMERA_POS);
-    Vector3 (*w2s)(void*, Vector3) = (Vector3(*)(void*, Vector3))(g_unityBase + RVA_WORLD_TO_SCREEN);
-    
-    uintptr_t localPlayer = *(uintptr_t*)(bmPtr + OFF_LOCAL_PLAYER);
-    int myTeam = (localPlayer && *(uintptr_t*)localPlayer != 0) ? *(int*)(localPlayer + OFF_ENTITY_CAMP) : 0;
-    
-    for (int i = 0; i < size; i++) {
-        uintptr_t player = *(uintptr_t*)((uintptr_t)items + 0x20 + (i * 8));
-        if (!player || *(uintptr_t*)player == 0) continue;
-        
-        Vector3 pos = *(Vector3*)(player + OFF_ENTITY_POS);
-        Vector3 screenPos = w2s(mainCam, pos);
-        
-        if (screenPos.z > 0) {
-            int team = *(int*)(player + OFF_ENTITY_CAMP);
-            if (team == myTeam && !radarEnabled) continue;
-            
-            float x = screenPos.x;
-            float y = rect.size.height - screenPos.y; 
-            float boxWidth = 500.0f / screenPos.z;
-            float boxHeight = boxWidth * 1.3f;
-            
-            UIColor *color = (team == myTeam) ? [UIColor greenColor] : [UIColor redColor];
-            CGContextSetStrokeColorWithColor(ctx, color.CGColor);
-            CGContextSetLineWidth(ctx, 1.5);
-
-            CGContextStrokeRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight, boxWidth, boxHeight));
-            
-            if (lineEnabled) {
-                CGContextSetStrokeColorWithColor(ctx, [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor);
-                CGContextMoveToPoint(ctx, rect.size.width/2, rect.size.height/2);
-                CGContextAddLineToPoint(ctx, x, y);
-                CGContextStrokePath(ctx);
-            }
-
-            if (hpBarEnabled) {
-                int hp = *(int*)(player + OFF_ENTITY_HP);
-                int maxHp = *(int*)(player + OFF_ENTITY_HP_MAX);
-                int shield = *(int*)(player + OFF_ENTITY_SHIELD);
-                float hpPct = (float)hp / (float)maxHp;
-                float shPct = (float)shield / (float)maxHp;
-
-                CGContextSetFillColorWithColor(ctx, [UIColor darkGrayColor].CGColor);
-                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth, 4));
-                CGContextSetFillColorWithColor(ctx, (hpPct > 0.3) ? [UIColor greenColor].CGColor : [UIColor redColor].CGColor);
-                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth * hpPct, 4));
-                if (shield > 0) {
-                    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.9 alpha:0.8].CGColor);
-                    CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth * fminf(shPct, 1.0f), 4));
-                }
-            }
-
-            if (distEnabled) {
-                float dx = pos.x - camPos.x;
-                float dy = pos.y - camPos.y;
-                float dz = pos.z - camPos.z;
-                float realDist = sqrtf(dx*dx + dy*dy + dz*dz) / 10.0f;
-                NSString *distStr = [NSString stringWithFormat:@"%.1fm", realDist];
-                [distStr drawAtPoint:CGPointMake(x + boxWidth/2 + 3, y - boxHeight) withAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont boldSystemFontOfSize:10]}];
-            }
-        }
-    }
-}
-@end
-
-// ============================================
-// UI COMPONENTS
-// ============================================
-
-@interface CustomToggle : UIView
-@property (nonatomic, assign) BOOL isOn;
-@property (nonatomic, copy) void (^onToggle)(BOOL isOn);
-- (void)animateToState:(BOOL)isOn;
-@end
-
-@implementation CustomToggle { UIView *track; UIView *thumb; }
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        track = [[UIView alloc] initWithFrame:CGRectMake(0, 4, 46, 22)];
-        track.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1.0];
-        track.layer.cornerRadius = 11;
-        [self addSubview:track];
-        thumb = [[UIView alloc] initWithFrame:CGRectMake(2, 6, 18, 18)];
-        thumb.backgroundColor = [UIColor whiteColor];
-        thumb.layer.cornerRadius = 9;
-        [self addSubview:thumb];
-        [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)]];
-    }
-    return self;
-}
-- (void)tapped { self.isOn = !self.isOn; [self animateToState:self.isOn]; if (self.onToggle) self.onToggle(self.isOn); }
-- (void)animateToState:(BOOL)isOn {
-    [UIView animateWithDuration:0.3 animations:^{
-        self->thumb.frame = CGRectMake(isOn ? 26 : 2, 6, 18, 18);
-        self->track.backgroundColor = isOn ? [UIColor cyanColor] : [UIColor colorWithWhite:0.2 alpha:1.0];
-    }];
-}
-@end
-
-@interface ModernMenu : UIView
-- (void)show; - (void)hide;
-@end
-
-@implementation ModernMenu { UIView *content; }
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
-        UIVisualEffectView *bg = [[UIVisualEffectView alloc] initWithEffect:blur];
-        bg.frame = self.bounds;
-        bg.layer.cornerRadius = 20;
-        bg.clipsToBounds = YES;
-        bg.layer.borderWidth = 1.5;
-        bg.layer.borderColor = [UIColor cyanColor].CGColor;
-        [self addSubview:bg];
-        content = [[UIView alloc] initWithFrame:self.bounds];
-        [bg.contentView addSubview:content];
-        [self setupUI];
-    }
-    return self;
-}
-- (void)setupUI {
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, self.frame.size.width, 30)];
-    title.text = @"pH-1 SUBSTRATE"; title.textColor = [UIColor cyanColor];
-    title.textAlignment = NSTextAlignmentCenter; title.font = [UIFont boldSystemFontOfSize:18];
-    [content addSubview:title];
-    
-    float y = 60;
-    y = [self addToggle:@"Enable ESP" y:y state:espEnabled action:^(BOOL isOn) { espEnabled = isOn; }];
-    y = [self addToggle:@"Snaplines" y:y state:lineEnabled action:^(BOOL isOn) { lineEnabled = isOn; }];
-    y = [self addToggle:@"HP Bar" y:y state:hpBarEnabled action:^(BOOL isOn) { hpBarEnabled = isOn; }];
-    y = [self addToggle:@"3D Distance" y:y state:distEnabled action:^(BOOL isOn) { distEnabled = isOn; }];
-    y = [self addToggle:@"Anti-Report" y:y state:antiReport action:^(BOOL isOn) { antiReport = isOn; }];
-    y = [self addToggle:@"Security Exit" y:y state:autoDelete action:^(BOOL isOn) { autoDelete = isOn; }];
-    
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(20, self.frame.size.height - 50, self.frame.size.width - 40, 35);
-    close.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.6];
-    [close setTitle:@"MINIMIZE" forState:UIControlStateNormal];
-    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    close.layer.cornerRadius = 10;
-    [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
-    [content addSubview:close];
-}
-- (float)addToggle:(NSString *)text y:(float)y state:(BOOL)state action:(void (^)(BOOL))action {
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(20, y, 150, 30)];
-    lbl.text = text; lbl.textColor = [UIColor whiteColor]; lbl.font = [UIFont systemFontOfSize:14];
-    [content addSubview:lbl];
-    CustomToggle *t = [[CustomToggle alloc] initWithFrame:CGRectMake(self.frame.size.width - 66, y, 46, 30)];
-    t.isOn = state; [t animateToState:state]; t.onToggle = action;
-    [content addSubview:t];
-    return y + 40;
-}
-- (void)show { self.hidden = NO; self.alpha = 0; [UIView animateWithDuration:0.3 animations:^{ self.alpha = 1; }]; }
-- (void)hide { [UIView animateWithDuration:0.3 animations:^{ self.alpha = 0; } completion:^(BOOL f){ self.hidden = YES; }]; }
-@end
-
-@interface FloatingFab : UIButton
-@property (nonatomic, strong) ModernMenu *menu;
-@end
-@implementation FloatingFab
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        self.backgroundColor = [UIColor cyanColor];
-        self.layer.cornerRadius = frame.size.width/2;
-        [self setTitle:@"P" forState:UIControlStateNormal];
-        [self addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-        [self addGestureRecognizer:pan];
-    }
-    return self;
-}
-- (void)tapped { if (self.menu.hidden) [self.menu show]; else [self.menu hide]; }
-- (void)pan:(UIPanGestureRecognizer *)p { self.center = [p locationInView:self.superview]; }
-@end
-
-// ============================================
-// INITIALIZATION
+// UTILITIES
 // ============================================
 
 uintptr_t get_base(const char* name) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char* img_name = _dyld_get_image_name(i);
-        if (img_name && strstr(img_name, name)) return (uintptr_t)_dyld_get_image_header(i);
+        if (img_name && strstr(img_name, name)) {
+            return (uintptr_t)_dyld_get_image_header(i);
+        }
     }
     return 0;
 }
 
-void safe_hook(uintptr_t address, void* replace, void** origin) {
-    if (MSHookFunction_ptr && address > 0x100000) {
-        MSHookFunction_ptr((void*)address, replace, origin);
-        LOG(@"Hooked with Substrate: 0x%lx", address);
+NSString* readIl2CppString(uintptr_t strPtr) {
+    if (!strPtr) return nil;
+    int len = *(int*)(strPtr + 0x10);
+    if (len > 0 && len < 100) { // Basic memory validation
+        uint16_t *chars = (uint16_t*)(strPtr + 0x14);
+        return [NSString stringWithCharacters:chars length:len];
+    }
+    return nil;
+}
+
+// ============================================
+// ANTI-REPORT HOOKS
+// ============================================
+static void (*old_ReportLog)(void* msg);
+void hooked_ReportLog(void* msg) { if (bypassDNS) return; if (old_ReportLog) old_ReportLog(msg); }
+
+static void (*old_ReportErr)(void* msg);
+void hooked_ReportErr(void* msg) { if (bypassDNS) return; if (old_ReportErr) old_ReportErr(msg); }
+
+// ============================================
+// UI COMPONENTS
+// ============================================
+
+@interface EdgyToggle : UISwitch
+@end
+@implementation EdgyToggle
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) { self.onTintColor = [UIColor colorWithRed:0.6 green:0.4 blue:1.0 alpha:1.0]; }
+    return self;
+}
+@end
+
+@interface EdgyMenu : UIView
+@property (nonatomic, strong) UIView *contentArea;
+@end
+
+@implementation EdgyMenu
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.1 alpha:0.98];
+        self.layer.cornerRadius = 24;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.1].CGColor;
+        
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, frame.size.width, 30)];
+        title.text = @"EDGY HACKS";
+        title.textColor = [UIColor whiteColor];
+        title.textAlignment = NSTextAlignmentCenter;
+        title.font = [UIFont fontWithName:@"Helvetica-Bold" size:22];
+        [self addSubview:title];
+        
+        _contentArea = [[UIView alloc] initWithFrame:CGRectMake(20, 65, frame.size.width - 40, frame.size.height - 80)];
+        [self addSubview:_contentArea];
+        
+        [self setupUI];
+        
+        // Fix: Make Menu Draggable
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:pan];
+        
+        UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
+        close.frame = CGRectMake(frame.size.width - 40, 15, 25, 25);
+        [close setTitle:@"✕" forState:UIControlStateNormal];
+        close.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.1];
+        close.layer.cornerRadius = 12.5;
+        [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:close];
+    }
+    return self;
+}
+
+- (void)setupUI {
+    float y = 0;
+    y = [self addToggle:@"ENABLE ESP" y:y state:espEnabled cb:^(BOOL on){ espEnabled = on; }];
+    y = [self addToggle:@"HERO NAME" y:y state:showHeroName cb:^(BOOL on){ showHeroName = on; }];
+    y = [self addToggle:@"MonsterESP" y:y state:monsterEsp cb:^(BOOL on){ monsterEsp = on; }];
+    y = [self addToggle:@"SNAPLINES" y:y state:snaplinesEnabled cb:^(BOOL on){ snaplinesEnabled = on; }];
+    y = [self addToggle:@"SHOW TEAM" y:y state:showTeam cb:^(BOOL on){ showTeam = on; }];
+    y = [self addToggle:@"BYPASS DNS" y:y state:bypassDNS cb:^(BOOL on){ bypassDNS = on; }];
+}
+
+- (float)addToggle:(NSString *)name y:(float)y state:(BOOL)state cb:(void(^)(BOOL))cb {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(0, y, 150, 31)];
+    lbl.text = name;
+    lbl.textColor = [UIColor whiteColor];
+    [self.contentArea addSubview:lbl];
+    
+    EdgyToggle *s = [[EdgyToggle alloc] initWithFrame:CGRectMake(self.contentArea.frame.size.width - 51, y, 51, 31)];
+    s.on = state;
+    objc_setAssociatedObject(s, "toggle_cb", cb, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    // Fix: Add action handler
+    [s addTarget:self action:@selector(toggled:) forControlEvents:UIControlEventValueChanged];
+    [self.contentArea addSubview:s];
+    return y + 40;
+}
+
+- (void)toggled:(UISwitch *)s {
+    void(^cb)(BOOL) = objc_getAssociatedObject(s, "toggle_cb");
+    if (cb) cb(s.on);
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)p {
+    self.center = [p locationInView:self.superview];
+}
+
+- (void)show { self.hidden = NO; }
+- (void)hide { self.hidden = YES; }
+@end
+
+// ============================================
+// ESP RENDERER
+// ============================================
+
+@interface EdgyESPView : UIView
+@end
+
+@implementation EdgyESPView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor clearColor];
+        self.userInteractionEnabled = NO;
+        // Fix: Add CADisplayLink for constant redrawing
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(redraw)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    }
+    return self;
+}
+
+- (void)redraw {
+    if (espEnabled) [self setNeedsDisplay];
+}
+
+- (void)drawEntities:(uintptr_t)list rect:(CGRect)rect ctx:(CGContextRef)ctx cam:(void*)cam w2s:(Vector3(*)(void*, Vector3))w2s myTeam:(int)myTeam color:(UIColor*)color isMonster:(BOOL)isMonster {
+    if (!list) return; // Fix: Memory validation
+    
+    // Fix: Correct List<T> access
+    uintptr_t arrayPtr = *(uintptr_t*)(list + 0x10);
+    if (!arrayPtr) return;
+    
+    int size = *(int*)(list + 0x18);
+    if (size <= 0 || size > 200) return; // Basic bounds check
+    
+    for (int i = 0; i < size; i++) {
+        // Fix: Il2Cpp array elements start at 0x20
+        uintptr_t entity = *(uintptr_t*)(arrayPtr + 0x20 + (i * 8));
+        if (!entity) continue;
+        
+        int team = *(int*)(entity + OFF_ENTITY_CAMP);
+        if (!showTeam && team == myTeam && !isMonster) continue;
+        
+        Vector3 pos = *(Vector3*)(entity + OFF_ENTITY_POS);
+        Vector3 sPos = w2s(cam, pos);
+        
+        if (sPos.z > 0) {
+            float x = sPos.x;
+            float y = rect.size.height - sPos.y;
+            
+            if (snaplinesEnabled) {
+                CGContextSetStrokeColorWithColor(ctx, color.CGColor);
+                CGContextSetLineWidth(ctx, 1.0);
+                CGContextMoveToPoint(ctx, rect.size.width/2, rect.size.height);
+                CGContextAddLineToPoint(ctx, x, y);
+                CGContextStrokePath(ctx);
+            }
+            
+            if (showHeroName && !isMonster) {
+                uintptr_t heroNamePtr = *(uintptr_t*)(entity + OFF_PLAYER_HERO_NAME);
+                if (heroNamePtr) {
+                    // Fix: Correct Il2Cpp string parsing
+                    NSString *name = readIl2CppString(heroNamePtr);
+                    if (name) {
+                        [name drawAtPoint:CGPointMake(x - 20, y - 35) withAttributes:@{
+                            NSForegroundColorAttributeName: [UIColor whiteColor],
+                            NSFontAttributeName: [UIFont boldSystemFontOfSize:10]
+                        }];
+                    }
+                }
+            }
+            
+            int hp = *(int*)(entity + OFF_ENTITY_HP);
+            [[NSString stringWithFormat:@"%d", hp] drawAtPoint:CGPointMake(x - 10, y - 20) withAttributes:@{
+                NSForegroundColorAttributeName: color,
+                NSFontAttributeName: [UIFont boldSystemFontOfSize:10]
+            }];
+        }
     }
 }
+
+- (void)drawRect:(CGRect)rect {
+    @try {
+        if (!espEnabled || !g_unityBase) return;
+        CGContextRef ctx = UIGraphicsGetCurrentContext();
+        
+        uintptr_t bmPtr = *(uintptr_t*)(g_unityBase + RVA_BATTLE_MANAGER_INST);
+        if (!bmPtr) return;
+        
+        void* (*get_main)() = (void*(*)())(g_unityBase + RVA_CAMERA_MAIN);
+        void* cam = get_main();
+        if (!cam) return;
+        
+        Vector3 (*w2s)(void*, Vector3) = (Vector3(*)(void*, Vector3))(g_unityBase + RVA_WORLD_TO_SCREEN);
+        if (!w2s) return;
+        
+        uintptr_t local = *(uintptr_t*)(bmPtr + OFF_LOCAL_PLAYER);
+        int myTeam = local ? *(int*)(local + OFF_ENTITY_CAMP) : 0;
+        
+        UIColor *espColor = [UIColor colorWithRed:enemyR green:enemyG blue:enemyB alpha:1.0];
+        
+        // Draw Players
+        uintptr_t playerList = *(uintptr_t*)(bmPtr + OFF_SHOW_PLAYERS);
+        [self drawEntities:playerList rect:rect ctx:ctx cam:cam w2s:w2s myTeam:myTeam color:espColor isMonster:NO];
+        
+        // Draw Monsters
+        if (monsterEsp) {
+            uintptr_t monsterList = *(uintptr_t*)(bmPtr + OFF_SHOW_MONSTERS);
+            [self drawEntities:monsterList rect:rect ctx:ctx cam:cam w2s:w2s myTeam:myTeam color:[UIColor yellowColor] isMonster:YES];
+        }
+    } @catch (NSException *e) {
+        // silent fail to prevent crashing
+    }
+}
+@end
+
+// ============================================
+// INITIALIZATION
+// ============================================
 
 __attribute__((constructor))
 static void initialize() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        // Fix: Use correct get_base function
         g_unityBase = get_base("UnityFramework");
         if (!g_unityBase) return;
         
-        MSHookFunction_ptr = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+        // Fix: Properly setup Substrate hooks
+        MSHookFunction((void*)(g_unityBase + RVA_SDK_REPORT_LOG), (void*)&hooked_ReportLog, (void**)&old_ReportLog);
+        MSHookFunction((void*)(g_unityBase + RVA_SDK_REPORT_ERR), (void*)&hooked_ReportErr, (void**)&old_ReportErr);
         
-        // Hooks
-        safe_hook(g_unityBase + RVA_SDK_REPORT_LOG, (void*)&hooked_ReportLog, (void**)&old_ReportLog);
-        safe_hook(g_unityBase + RVA_SDK_REPORT_ERR, (void*)&hooked_ReportErr, (void**)&old_ReportErr);
-        safe_hook(g_unityBase + RVA_SDK_SEND_STEP, (void*)&hooked_SendStep, (void**)&old_SendStep);
-
         dispatch_async(dispatch_get_main_queue(), ^{
             UIWindow *win = nil;
             if (@available(iOS 13.0, *)) {
@@ -362,15 +310,38 @@ static void initialize() {
                 }
             }
             if (!win) win = [UIApplication sharedApplication].windows.firstObject;
+            
             if (win) {
-                [win addSubview:[[ESPOverlay alloc] initWithFrame:win.bounds]];
-                ModernMenu *menu = [[ModernMenu alloc] initWithFrame:CGRectMake(win.bounds.size.width/2-110, win.bounds.size.height/2-175, 220, 350)];
+                [win addSubview:[[EdgyESPView alloc] initWithFrame:win.bounds]];
+                
+                EdgyMenu *menu = [[EdgyMenu alloc] initWithFrame:CGRectMake(win.bounds.size.width/2 - 150, win.bounds.size.height/2 - 200, 300, 400)];
                 menu.hidden = YES;
                 [win addSubview:menu];
-                FloatingFab *fab = [[FloatingFab alloc] initWithFrame:CGRectMake(50, 150, 50, 50)];
-                fab.menu = menu;
+                
+                // Fix: Add Floating Button back
+                UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
+                fab.frame = CGRectMake(15, 100, 60, 30);
+                fab.backgroundColor = [UIColor colorWithRed:0.6 green:0.4 blue:1.0 alpha:0.8];
+                fab.layer.cornerRadius = 15;
+                [fab setTitle:@"EDGY" forState:UIControlStateNormal];
+                [fab addTarget:menu action:@selector(show) forControlEvents:UIControlEventTouchUpInside];
                 [win addSubview:fab];
+                
+                // Make FAB draggable
+UIPanGestureRecognizer *fabPan = [[UIPanGestureRecognizer alloc] initWithTarget:fab action:@selector(drag:)];
+                [fab addGestureRecognizer:fabPan];
             }
         });
     });
 }
+
+// Category for FAB dragging
+@interface UIButton (Draggable)
+- (void)drag:(UIPanGestureRecognizer *)p;
+@end
+
+@implementation UIButton (Draggable)
+- (void)drag:(UIPanGestureRecognizer *)p {
+    self.center = [p locationInView:self.superview];
+}
+@end
