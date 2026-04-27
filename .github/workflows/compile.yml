@@ -1,31 +1,114 @@
-name: Compile Tweak
+name: Compile pH-1 Pro Dylib
 
 on:
   push:
     branches:
       - main
       - master
-  pull_request:
-    branches:
-      - main
-      - master
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Setup Theos
-        uses: actions/checkout@v3
-        with:
-          repository: theos/theos
-          path: theos
-          submodules: recursive
+      - name: Install ldid
+        run: brew install ldid
 
-      - name: Compile Tweak
+      - name: Create include directory and headers
         run: |
-          echo "Please add your Makefile and adjust the compile command."
-          # make package FINALPACKAGE=1
+          mkdir -p include
+          
+          # Create substrate.h dummy for compilation
+          cat > include/substrate.h << 'EOF'
+          #ifndef SUBSTRATE_H
+          #define SUBSTRATE_H
+          #include <stdbool.h>
+          #include <stddef.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          void MSHookFunction(void *symbol, void *replace, void **result);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          EOF
+
+      - name: Compile tweak to ph1mlbb.dylib
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          
+          # Try different possible source file names
+          if [ -f "tweak.mm" ]; then
+            SOURCE="tweak.mm"
+          elif [ -f "antigravity.mm" ]; then
+            SOURCE="antigravity.mm"
+          elif [ -f "ph1pro.mm" ]; then
+            SOURCE="ph1pro.mm"
+          elif [ -f "Tweak.xm" ]; then
+            SOURCE="Tweak.xm"
+          else
+            echo "Error: No source file found!"
+            exit 1
+          fi
+          
+          echo "Compiling $SOURCE"
+          
+          xcrun -sdk iphoneos clang++ \
+            -dynamiclib \
+            -arch arm64 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=14.0 \
+            -I./include \
+            -fobjc-arc \
+            -Wl,-undefined,dynamic_lookup \
+            -framework UIKit \
+            -framework Foundation \
+            -framework CoreGraphics \
+            -framework QuartzCore \
+            "$SOURCE" \
+            -o ph1mlbb.dylib
+
+      - name: Sign dylib with entitlements
+        run: |
+          cat > entitlements.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>platform-application</key>
+              <true/>
+              <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+              <true/>
+              <key>com.apple.security.cs.disable-library-validation</key>
+              <true/>
+              <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+              <true/>
+              <key>com.apple.security.cs.debugger-attach</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          
+          ldid -Sentitlements.plist ph1mlbb.dylib
+
+      - name: Verify dylib
+        run: |
+          echo "=== File Info ==="
+          file ph1mlbb.dylib
+          echo ""
+          echo "=== Load Commands ==="
+          otool -L ph1mlbb.dylib
+          echo ""
+          echo "=== Architecture ==="
+          lipo -info ph1mlbb.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aph1mlbb_dylib
+          path: ph1mlbb.dylib
