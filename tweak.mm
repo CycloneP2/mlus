@@ -1,5 +1,5 @@
-// Tweak.mm - MLBB MOD STANDALONE (ULTIMATE NON-JB EDITION)
-// FEATURES: Pattern Scan, DobbyHook, Advanced Anti-Report, Stealth UI
+// Tweak.mm - MLBB MOD (SUBSTRATE/SUBSTITUTE EDITION)
+// ADVANCED FEATURES: Pattern Scan, Real 3D Distance, Ultimate Anti-Report
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -7,13 +7,12 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
-#import <sys/syslog.h>
 #import <math.h>
 
 typedef struct { float x, y, z; } Vector3;
 
 // ============================================
-// LOG SYSTEM (STEALTH)
+// LOG SYSTEM
 // ============================================
 void add_log(NSString *msg) { NSLog(@"[pH-1] %@", msg); }
 #define LOG(fmt, ...) add_log([NSString stringWithFormat:fmt, ##__VA_ARGS__])
@@ -39,11 +38,11 @@ namespace Memory {
 }
 
 // ============================================
-// GLOBAL DATA
+// GLOBAL DATA & OFFSETS
 // ============================================
 static uintptr_t g_unityBase = 0;
-static void* g_dobbyHandle = NULL;
-typedef int (*DobbyHook_t)(void *target, void *replace, void **origin);
+typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
+static MSHookFunction_t MSHookFunction_ptr = NULL;
 
 static BOOL espEnabled = YES;
 static BOOL lineEnabled = YES;
@@ -52,10 +51,7 @@ static BOOL distEnabled = YES;
 static BOOL antiReport = YES;
 static BOOL autoDelete = YES;
 static BOOL radarEnabled = YES;
-static BOOL droneEnabled = NO;
-static float droneFov = 70.0;
 
-// Offsets (Fallbacks if Pattern Scan fails)
 #define OFF_BATTLE_MANAGER_INST 0xADC8A0   
 #define OFF_SHOW_PLAYERS        0x78        
 #define OFF_LOCAL_PLAYER        0x50        
@@ -64,34 +60,39 @@ static float droneFov = 70.0;
 #define OFF_ENTITY_HP           0x1AC       
 #define OFF_ENTITY_HP_MAX       0x1B0       
 #define OFF_ENTITY_SHIELD       0x1B8       
-#define OFF_PLAYER_HERO_NAME    0x918       
 #define RVA_WORLD_TO_SCREEN     0x89FE040   
 #define RVA_CAMERA_MAIN         0x89FF130   
-#define OFF_CAMERA_POS          0x42C
+#define OFF_CAMERA_POS          0x42C 
+
+#define RVA_SDK_REPORT_LOG      0x4CEB580
+#define RVA_SDK_REPORT_ERR      0x4CEB690
+#define RVA_SDK_SEND_STEP       0x4CEB7A0
 
 // ============================================
-// ADVANCED SECURITY
+// ADVANCED SECURITY (SELF-DESTRUCT)
 // ============================================
 
 void self_destruct() {
-    LOG(@"[CRITICAL] Anti-Ban Self-Destruct Initiated!");
+    LOG(@"[CRITICAL] Security Triggered! Renaming and Crashing...");
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
         if (name && (strstr(name, "mlbb_m.dylib") || strstr(name, "edgymlbb.dylib"))) {
             NSString *oldPath = [NSString stringWithUTF8String:name];
-            NSString *newPath = [oldPath stringByAppendingString:@".bak"];
-            rename([oldPath UTF8String], [newPath UTF8String]);
+            rename([oldPath UTF8String], [[oldPath stringByAppendingString:@".bak"] UTF8String]);
+            
+            // Wipe memory header
             uintptr_t addr = (uintptr_t)_dyld_get_image_header(i);
-            mach_port_t self_task = mach_task_self();
-            vm_protect(self_task, (vm_address_t)addr, 4096, FALSE, VM_PROT_READ | VM_PROT_WRITE);
+            mach_port_t task = mach_task_self();
+            vm_protect(task, (vm_address_t)addr, 4096, FALSE, VM_PROT_READ | VM_PROT_WRITE);
             memset((void*)addr, 0, 4096);
             break;
         }
     }
-    *(int*)0 = 0xDEAD;
+    *(int*)0 = 0; // Force crash
 }
 
+// Anti-Report Hooks
 static void (*old_ReportLog)(void* msg);
 void hooked_ReportLog(void* msg) { if (antiReport) return; if (old_ReportLog) old_ReportLog(msg); }
 
@@ -101,31 +102,8 @@ void hooked_ReportErr(void* msg) { if (antiReport) return; if (old_ReportErr) ol
 static void (*old_SendStep)(void* msg);
 void hooked_SendStep(void* msg) { if (antiReport) return; if (old_SendStep) old_SendStep(msg); }
 
-static bool (*old_get_isVisible)(void* instance);
-bool hooked_get_isVisible(void* instance) {
-    if (radarEnabled) return true;
-    return old_get_isVisible ? old_get_isVisible(instance) : true;
-}
-
 // ============================================
-// HOOKING ENGINE
-// ============================================
-
-void safe_hook(uintptr_t address, void* replace, void** origin) {
-    if (!address || address < 0x100000) return;
-    static DobbyHook_t DobbyHook_ptr = NULL;
-    if (!DobbyHook_ptr) {
-        DobbyHook_ptr = (DobbyHook_t)dlsym(RTLD_DEFAULT, "DobbyHook");
-        if (!DobbyHook_ptr) {
-            void* h = dlopen("@executable_path/Frameworks/libDobby.dylib", RTLD_LAZY);
-            if (h) DobbyHook_ptr = (DobbyHook_t)dlsym(h, "DobbyHook");
-        }
-    }
-    if (DobbyHook_ptr) DobbyHook_ptr((void*)address, replace, origin);
-}
-
-// ============================================
-// ESP RENDERER
+// ESP RENDERER (REAL 3D DISTANCE)
 // ============================================
 
 @interface ESPOverlay : UIView
@@ -181,13 +159,14 @@ void safe_hook(uintptr_t address, void* replace, void** origin) {
             if (team == myTeam && !radarEnabled) continue;
             
             float x = screenPos.x;
-            float y = rect.size.height - screenPos.y;
+            float y = rect.size.height - screenPos.y; 
             float boxWidth = 500.0f / screenPos.z;
             float boxHeight = boxWidth * 1.3f;
             
             UIColor *color = (team == myTeam) ? [UIColor greenColor] : [UIColor redColor];
             CGContextSetStrokeColorWithColor(ctx, color.CGColor);
             CGContextSetLineWidth(ctx, 1.5);
+
             CGContextStrokeRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight, boxWidth, boxHeight));
             
             if (lineEnabled) {
@@ -228,11 +207,117 @@ void safe_hook(uintptr_t address, void* replace, void** origin) {
 @end
 
 // ============================================
-// UI MENU & FLOATING BUTTON
+// UI COMPONENTS
 // ============================================
 
-// [UI code for CustomToggle, ModernMenu, FloatingFab omitted for brevity]
-// Same as original but functional
+@interface CustomToggle : UIView
+@property (nonatomic, assign) BOOL isOn;
+@property (nonatomic, copy) void (^onToggle)(BOOL isOn);
+- (void)animateToState:(BOOL)isOn;
+@end
+
+@implementation CustomToggle { UIView *track; UIView *thumb; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        track = [[UIView alloc] initWithFrame:CGRectMake(0, 4, 46, 22)];
+        track.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1.0];
+        track.layer.cornerRadius = 11;
+        [self addSubview:track];
+        thumb = [[UIView alloc] initWithFrame:CGRectMake(2, 6, 18, 18)];
+        thumb.backgroundColor = [UIColor whiteColor];
+        thumb.layer.cornerRadius = 9;
+        [self addSubview:thumb];
+        [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)]];
+    }
+    return self;
+}
+- (void)tapped { self.isOn = !self.isOn; [self animateToState:self.isOn]; if (self.onToggle) self.onToggle(self.isOn); }
+- (void)animateToState:(BOOL)isOn {
+    [UIView animateWithDuration:0.3 animations:^{
+        self->thumb.frame = CGRectMake(isOn ? 26 : 2, 6, 18, 18);
+        self->track.backgroundColor = isOn ? [UIColor cyanColor] : [UIColor colorWithWhite:0.2 alpha:1.0];
+    }];
+}
+@end
+
+@interface ModernMenu : UIView
+- (void)show; - (void)hide;
+@end
+
+@implementation ModernMenu { UIView *content; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        UIVisualEffectView *bg = [[UIVisualEffectView alloc] initWithEffect:blur];
+        bg.frame = self.bounds;
+        bg.layer.cornerRadius = 20;
+        bg.clipsToBounds = YES;
+        bg.layer.borderWidth = 1.5;
+        bg.layer.borderColor = [UIColor cyanColor].CGColor;
+        [self addSubview:bg];
+        content = [[UIView alloc] initWithFrame:self.bounds];
+        [bg.contentView addSubview:content];
+        [self setupUI];
+    }
+    return self;
+}
+- (void)setupUI {
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, self.frame.size.width, 30)];
+    title.text = @"pH-1 SUBSTRATE"; title.textColor = [UIColor cyanColor];
+    title.textAlignment = NSTextAlignmentCenter; title.font = [UIFont boldSystemFontOfSize:18];
+    [content addSubview:title];
+    
+    float y = 60;
+    y = [self addToggle:@"Enable ESP" y:y state:espEnabled action:^(BOOL isOn) { espEnabled = isOn; }];
+    y = [self addToggle:@"Snaplines" y:y state:lineEnabled action:^(BOOL isOn) { lineEnabled = isOn; }];
+    y = [self addToggle:@"HP Bar" y:y state:hpBarEnabled action:^(BOOL isOn) { hpBarEnabled = isOn; }];
+    y = [self addToggle:@"3D Distance" y:y state:distEnabled action:^(BOOL isOn) { distEnabled = isOn; }];
+    y = [self addToggle:@"Anti-Report" y:y state:antiReport action:^(BOOL isOn) { antiReport = isOn; }];
+    y = [self addToggle:@"Security Exit" y:y state:autoDelete action:^(BOOL isOn) { autoDelete = isOn; }];
+    
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(20, self.frame.size.height - 50, self.frame.size.width - 40, 35);
+    close.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.6];
+    [close setTitle:@"MINIMIZE" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    close.layer.cornerRadius = 10;
+    [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
+    [content addSubview:close];
+}
+- (float)addToggle:(NSString *)text y:(float)y state:(BOOL)state action:(void (^)(BOOL))action {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(20, y, 150, 30)];
+    lbl.text = text; lbl.textColor = [UIColor whiteColor]; lbl.font = [UIFont systemFontOfSize:14];
+    [content addSubview:lbl];
+    CustomToggle *t = [[CustomToggle alloc] initWithFrame:CGRectMake(self.frame.size.width - 66, y, 46, 30)];
+    t.isOn = state; [t animateToState:state]; t.onToggle = action;
+    [content addSubview:t];
+    return y + 40;
+}
+- (void)show { self.hidden = NO; self.alpha = 0; [UIView animateWithDuration:0.3 animations:^{ self.alpha = 1; }]; }
+- (void)hide { [UIView animateWithDuration:0.3 animations:^{ self.alpha = 0; } completion:^(BOOL f){ self.hidden = YES; }]; }
+@end
+
+@interface FloatingFab : UIButton
+@property (nonatomic, strong) ModernMenu *menu;
+@end
+@implementation FloatingFab
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor cyanColor];
+        self.layer.cornerRadius = frame.size.width/2;
+        [self setTitle:@"P" forState:UIControlStateNormal];
+        [self addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
+        [self addGestureRecognizer:pan];
+    }
+    return self;
+}
+- (void)tapped { if (self.menu.hidden) [self.menu show]; else [self.menu hide]; }
+- (void)pan:(UIPanGestureRecognizer *)p { self.center = [p locationInView:self.superview]; }
+@end
 
 // ============================================
 // INITIALIZATION
@@ -247,12 +332,22 @@ uintptr_t get_base(const char* name) {
     return 0;
 }
 
+void safe_hook(uintptr_t address, void* replace, void** origin) {
+    if (MSHookFunction_ptr && address > 0x100000) {
+        MSHookFunction_ptr((void*)address, replace, origin);
+        LOG(@"Hooked with Substrate: 0x%lx", address);
+    }
+}
+
 __attribute__((constructor))
 static void initialize() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         g_unityBase = get_base("UnityFramework");
         if (!g_unityBase) return;
         
+        MSHookFunction_ptr = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+        
+        // Hooks
         safe_hook(g_unityBase + RVA_SDK_REPORT_LOG, (void*)&hooked_ReportLog, (void**)&old_ReportLog);
         safe_hook(g_unityBase + RVA_SDK_REPORT_ERR, (void*)&hooked_ReportErr, (void**)&old_ReportErr);
         safe_hook(g_unityBase + RVA_SDK_SEND_STEP, (void*)&hooked_SendStep, (void**)&old_SendStep);
@@ -267,7 +362,6 @@ static void initialize() {
                 }
             }
             if (!win) win = [UIApplication sharedApplication].windows.firstObject;
-            
             if (win) {
                 [win addSubview:[[ESPOverlay alloc] initWithFrame:win.bounds]];
                 ModernMenu *menu = [[ModernMenu alloc] initWithFrame:CGRectMake(win.bounds.size.width/2-110, win.bounds.size.height/2-175, 220, 350)];
