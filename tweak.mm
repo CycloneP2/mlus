@@ -33,6 +33,14 @@
 #define RVA_SET_FOV         0x89FB2B8
 
 // ============================================
+// LOG SYSTEM
+// ============================================
+void add_log(NSString *msg) {
+    NSLog(@"[MOD] %@", msg);
+}
+#define LOG(fmt, ...) add_log([NSString stringWithFormat:fmt, ##__VA_ARGS__])
+
+// ============================================
 // SAFE MEMORY ACCESS
 // ============================================
 static uintptr_t g_unityBase = 0;
@@ -82,7 +90,7 @@ static BOOL g_hpBar = YES;
 static BOOL g_skillCD = NO;
 static BOOL g_actionState = YES;
 static BOOL g_autoTap = NO;
-static float g_tapSpeed = 0.5f;  // 0.1 = cepat, 1.0 = lambat
+static float g_tapSpeed = 0.5f;
 
 // ============================================
 // AUTO TAP TIMER
@@ -97,18 +105,13 @@ static void start_auto_tap() {
     
     if (!g_autoTap || !g_isInBattle) return;
     
-    // Interval: 0.05s (cepat) sampai 0.5s (lambat)
     float interval = 0.5 - (g_tapSpeed * 0.4);
     if (interval < 0.05) interval = 0.05;
     if (interval > 0.5) interval = 0.5;
     
     g_autoTapTimer = [NSTimer scheduledTimerWithTimeInterval:interval repeats:YES block:^(NSTimer * _Nonnull timer) {
         @try {
-            // Simulate tap on basic attack button
-            // Method 1: Find UIButton and send action
-            // Method 2: Call game function directly
-            // Method 3: Post touch event
-            // Placeholder - sesuaikan dengan game
+            // Auto tap logic - sesuaikan dengan game
             // LOG(@"Auto Tap!");
         } @catch (NSException *e) {}
     }];
@@ -152,7 +155,6 @@ static NSString* get_action_text(int state) {
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
         
-        // Update setiap frame
         CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(update)];
         [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
@@ -199,7 +201,6 @@ static NSString* get_action_text(int state) {
         myTeam = safe_read_int(localPlayer + OFF_TEAM);
     }
     
-    float screenW = rect.size.width;
     float screenH = rect.size.height;
     float scale = [UIScreen mainScreen].scale;
     
@@ -207,7 +208,6 @@ static NSString* get_action_text(int state) {
         uintptr_t player = safe_read_ptr(items + 0x20 + (i * 8));
         if (!is_valid_address(player)) continue;
         
-        // Get position
         Vector3 pos = safe_read_vector3(player + OFF_POSITION);
         Vector3 screenPos = w2s(mainCam, pos);
         
@@ -224,10 +224,8 @@ static NSString* get_action_text(int state) {
             float boxW = (400.0f / distance) / scale;
             float boxH = boxW * 1.3f;
             
-            // Warna musuh
             UIColor *color = [UIColor redColor];
             CGContextSetStrokeColorWithColor(ctx, color.CGColor);
-            CGContextSetFillColorWithColor(ctx, [color colorWithAlphaComponent:0.15].CGColor);
             
             // ===== ESP BOX =====
             if (g_espBox) {
@@ -276,12 +274,6 @@ static NSString* get_action_text(int state) {
             }
         }
     }
-    
-    // ===== ESP SNAP LINE =====
-    if (g_espLine) {
-        // Implementasi garis dari tengah layar ke musuh
-        // Bisa ditambahkan sesuai kebutuhan
-    }
 }
 
 @end
@@ -304,7 +296,6 @@ static NSString* get_action_text(int state) {
         isOpen = NO;
         self.backgroundColor = [UIColor clearColor];
         
-        // Panel (rounded, transparent dark)
         panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 0)];
         panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
         panel.layer.cornerRadius = 12;
@@ -427,11 +418,12 @@ static NSString* get_action_text(int state) {
 - (void)switchChanged:(UISwitch*)sw {
     NSValue *ptrVal = objc_getAssociatedObject(sw, "statePtr");
     if (ptrVal) {
-        BOOL *state = [ptrVal pointerValue];
-        *state = sw.isOn;
-        
-        void(^action)(BOOL) = objc_getAssociatedObject(sw, "action");
-        if (action) action(sw.isOn);
+        BOOL *state = (BOOL *)[ptrVal pointerValue];
+        if (state) {
+            *state = sw.isOn;
+            void(^action)(BOOL) = objc_getAssociatedObject(sw, "action");
+            if (action) action(sw.isOn);
+        }
     }
 }
 
@@ -442,7 +434,6 @@ static NSString* get_action_text(int state) {
         speedValue.text = [NSString stringWithFormat:@"%.0f%%", g_tapSpeed * 100];
     }
     
-    // Restart auto tap with new speed
     if (g_autoTap) {
         stop_auto_tap();
         start_auto_tap();
@@ -474,10 +465,10 @@ static NSString* get_action_text(int state) {
 @end
 
 // ============================================
-// FLOATING BUTTON (MINIMALIS)
+// FLOATING BUTTON (FIXED - NO CONFLICT)
 // ============================================
 @interface MiniFloatingButton : UIButton
-@property (nonatomic, strong) MiniMenu *menu;
+@property (nonatomic, strong) MiniMenu *miniMenu;  // ← Renamed to avoid conflict
 @end
 
 @implementation MiniFloatingButton
@@ -504,7 +495,7 @@ static NSString* get_action_text(int state) {
 }
 
 - (void)tapped {
-    if (self.menu) [self.menu toggle];
+    if (self.miniMenu) [self.miniMenu toggle];
 }
 
 - (void)drag:(UIPanGestureRecognizer*)pan {
@@ -542,6 +533,7 @@ static void check_battle_status() {
 __attribute__((constructor))
 static void initialize() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        // Get base address
         g_unityBase = 0;
         for (uint32_t i = 0; i < _dyld_image_count(); i++) {
             const char *name = _dyld_get_image_name(i);
@@ -553,6 +545,9 @@ static void initialize() {
         
         if (!g_unityBase) return;
         
+        LOG(@"✅ UnityBase: 0x%lx", g_unityBase);
+        
+        // Get window
         UIWindow *win = nil;
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -565,14 +560,21 @@ static void initialize() {
         if (!win) win = [UIApplication sharedApplication].windows.firstObject;
         
         if (win) {
+            // ESP Overlay
             ESPOverlay *esp = [[ESPOverlay alloc] initWithFrame:win.bounds];
             [win addSubview:esp];
             
+            // Floating Button
             MiniFloatingButton *btn = [[MiniFloatingButton alloc] initWithFrame:CGRectMake(15, 120, 40, 40)];
+            
+            // Menu
             MiniMenu *menu = [[MiniMenu alloc] initWithFrame:CGRectMake(0, 0, 200, 0)];
-            btn.menu = menu;
+            btn.miniMenu = menu;
+            
             [win addSubview:btn];
             [win addSubview:menu];
+            
+            LOG(@"✅ UI Loaded!");
         }
         
         // Battle checker
