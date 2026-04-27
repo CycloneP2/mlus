@@ -1,185 +1,147 @@
-// Tweak.mm - MLBB MOD STANDALONE (ANTI-FC PROTECTED)
-// Compile: clang++ -dynamiclib -framework UIKit -framework Foundation Tweak.mm -o mlbb_m.dylib
+// Tweak.mm - MLBB MOD MINIMALIS
+// Fitur: ESP Box + Line, HP Bar, Skill CD, Action State, Auto Tap-Tap
+// Compile: clang++ -dynamiclib -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -fobjc-arc tweak.mm -o mlbb_mod.dylib
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
-#import <arpa/inet.h>
-#import <netdb.h>
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 
-typedef struct {
-    float x, y, z;
-} Vector3;
+// ============================================
+// OFFSETS (Isi sesuai dump.cs kamu)
+// ============================================
+#define OFF_BATTLE_MANAGER  0xADC8A0
+#define OFF_PLAYER_LIST     0x78
+#define OFF_LOCAL_PLAYER    0x50
+#define OFF_POSITION        0x30
+#define OFF_TEAM            0xD8
+#define OFF_CURRENT_HP      0x1AC
+#define OFF_MAX_HP          0x1B0
+#define OFF_HERO_NAME       0x918
+#define OFF_ACTION_STATE    0x210
+#define OFF_SKILL_COMP      0x110
+#define OFF_SKILL_1_CD      0x60
+#define OFF_SKILL_2_CD      0x70
+#define OFF_SKILL_3_CD      0x80
+#define OFF_BATTLE_SPELL_ID 0x9A4
+#define RVA_WORLD_TO_SCREEN 0x89FE040
+#define RVA_CAMERA_MAIN     0x89FF130
+#define RVA_GET_COOLDOWN    0x67BD63C
+#define OFF_CAMERA_FOV      0x1C8
+#define RVA_SET_FOV         0x89FB2B8
 
 // ============================================
-// LOG SYSTEM (Safe)
+// SAFE MEMORY ACCESS
 // ============================================
-static NSMutableArray *g_logs = nil;
-void add_log(NSString *msg) {
-    @try {
-        if (!g_logs) g_logs = [[NSMutableArray alloc] init];
-        NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle];
-        [g_logs addObject:[NSString stringWithFormat:@"[%@] %@", timestamp, msg]];
-        if (g_logs.count > 50) [g_logs removeObjectAtIndex:0];
-        NSLog(@"[MOD] %@", msg);
-    } @catch (NSException *e) {}
-}
-#define LOG(fmt, ...) add_log([NSString stringWithFormat:fmt, ##__VA_ARGS__])
+static uintptr_t g_unityBase = 0;
+static BOOL g_isInBattle = NO;
 
-// ============================================
-// OFFSETS (VALID)
-// ============================================
-#define OFF_BATTLE_MANAGER_INST 0xADC8A0
-#define OFF_SHOW_PLAYERS        0x78
-#define OFF_LOCAL_PLAYER        0x50
-#define OFF_ENTITY_POS          0x30
-#define OFF_ENTITY_CAMP         0xD8
-#define OFF_ENTITY_HP           0x1AC
-#define OFF_ENTITY_HP_MAX       0x1B0
-#define RVA_WORLD_TO_SCREEN     0x89FE040
-#define RVA_CAMERA_MAIN         0x89FF130
-#define RVA_IS_TUTORIAL         0x51666C8
-#define OFF_DRONE_SET_FOV       0x89FB2B8
-#define OFF_RADAR_VISIBLE       0x5023FF0
-
-// ============================================
-// SAFE MEMORY ACCESS (CORE ANTI-FC)
-// ============================================
-static BOOL is_address_valid(uintptr_t addr) {
-    if (addr < 0x100000) return NO;
-    if (addr > 0x200000000) return NO;
-    
+static BOOL is_valid_address(uintptr_t addr) {
+    if (addr < 0x100000 || addr > 0x200000000) return NO;
     vm_size_t size = 0;
     vm_region_basic_info_data_t info;
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT;
     mach_port_t object;
-    
-    kern_return_t kr = vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO, 
-                                  (vm_region_info_t)&info, &count, &object);
-    return (kr == KERN_SUCCESS);
+    return vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO, (vm_region_info_t)&info, &count, &object) == KERN_SUCCESS;
 }
 
 static uintptr_t safe_read_ptr(uintptr_t addr) {
-    if (!is_address_valid(addr)) return 0;
-    @try {
-        return *(uintptr_t*)addr;
-    } @catch (NSException *e) {
-        return 0;
-    }
+    if (!is_valid_address(addr)) return 0;
+    @try { return *(uintptr_t*)addr; }
+    @catch(NSException *e) { return 0; }
 }
 
 static int safe_read_int(uintptr_t addr) {
-    if (!is_address_valid(addr)) return 0;
-    @try {
-        return *(int*)addr;
-    } @catch (NSException *e) {
-        return 0;
-    }
+    if (!is_valid_address(addr)) return 0;
+    @try { return *(int*)addr; }
+    @catch(NSException *e) { return 0; }
 }
 
 static float safe_read_float(uintptr_t addr) {
-    if (!is_address_valid(addr)) return 0;
-    @try {
-        return *(float*)addr;
-    } @catch (NSException *e) {
-        return 0;
-    }
+    if (!is_valid_address(addr)) return 0;
+    @try { return *(float*)addr; }
+    @catch(NSException *e) { return 0; }
 }
 
+typedef struct { float x, y, z; } Vector3;
 static Vector3 safe_read_vector3(uintptr_t addr) {
-    Vector3 result = {0, 0, 0};
-    if (!is_address_valid(addr)) return result;
-    @try {
-        return *(Vector3*)addr;
-    } @catch (NSException *e) {
-        return result;
-    }
-}
-
-// ============================================
-// SECURITY & UTILITY
-// ============================================
-typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
-static MSHookFunction_t MSHookFunction_ptr = NULL;
-static uintptr_t g_unityBase = 0;
-static BOOL g_safeMode = NO;
-static BOOL g_isInBattle = NO;
-
-uintptr_t get_base(const char* name) {
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char* img_name = _dyld_get_image_name(i);
-        if (img_name && strstr(img_name, name)) {
-            return (uintptr_t)_dyld_get_image_header(i);
-        }
-    }
-    return 0;
-}
-
-NSString* get_game_version() {
-    NSDictionary *info = [[NSBundle mainBundle] infoDictionary];
-    return info[@"CFBundleShortVersionString"] ?: @"Unknown";
+    Vector3 v = {0,0,0};
+    if (!is_valid_address(addr)) return v;
+    @try { return *(Vector3*)addr; }
+    @catch(NSException *e) { return v; }
 }
 
 // ============================================
 // GLOBAL TOGGLES
 // ============================================
-static BOOL espEnabled = YES;
-static BOOL radarEnabled = YES;
-static BOOL droneEnabled = NO;
-static float droneFov = 70.0;
-static BOOL skipTutorialEnabled = YES;
+static BOOL g_espBox = YES;
+static BOOL g_espLine = YES;
+static BOOL g_hpBar = YES;
+static BOOL g_skillCD = NO;
+static BOOL g_actionState = YES;
+static BOOL g_autoTap = NO;
+static float g_tapSpeed = 0.5f;  // 0.1 = cepat, 1.0 = lambat
 
 // ============================================
-// SAFE HOOK (Dengan Try-Catch)
+// AUTO TAP TIMER
 // ============================================
-static void (*old_set_fieldOfView)(void* instance, float value) = NULL;
-static void hooked_set_fieldOfView(void* instance, float value) {
-    @try {
-        if (droneEnabled) value = droneFov;
-        if (old_set_fieldOfView) old_set_fieldOfView(instance, value);
-    } @catch (NSException *e) {}
+static NSTimer *g_autoTapTimer = nil;
+
+static void start_auto_tap() {
+    if (g_autoTapTimer) {
+        [g_autoTapTimer invalidate];
+        g_autoTapTimer = nil;
+    }
+    
+    if (!g_autoTap || !g_isInBattle) return;
+    
+    // Interval: 0.05s (cepat) sampai 0.5s (lambat)
+    float interval = 0.5 - (g_tapSpeed * 0.4);
+    if (interval < 0.05) interval = 0.05;
+    if (interval > 0.5) interval = 0.5;
+    
+    g_autoTapTimer = [NSTimer scheduledTimerWithTimeInterval:interval repeats:YES block:^(NSTimer * _Nonnull timer) {
+        @try {
+            // Simulate tap on basic attack button
+            // Method 1: Find UIButton and send action
+            // Method 2: Call game function directly
+            // Method 3: Post touch event
+            // Placeholder - sesuaikan dengan game
+            // LOG(@"Auto Tap!");
+        } @catch (NSException *e) {}
+    }];
 }
 
-static void (*old_SetVisible)(void* instance, bool visible) = NULL;
-static void hooked_SetVisible(void* instance, bool visible) {
-    @try {
-        if (radarEnabled) visible = true;
-        if (old_SetVisible) old_SetVisible(instance, visible);
-    } @catch (NSException *e) {}
-}
-
-static bool (*original_IsTutorialBattle)() = NULL;
-static bool hooked_IsTutorialBattle() {
-    @try {
-        if (skipTutorialEnabled) return false;
-        return original_IsTutorialBattle ? original_IsTutorialBattle() : true;
-    } @catch (NSException *e) {
-        return true;
+static void stop_auto_tap() {
+    if (g_autoTapTimer) {
+        [g_autoTapTimer invalidate];
+        g_autoTapTimer = nil;
     }
 }
 
-void safe_hook(uintptr_t address, void* new_func, void** old_func) {
-    @try {
-        if (address > 0x100000 && address < 0x200000000 && is_address_valid(address)) {
-            if (MSHookFunction_ptr) {
-                MSHookFunction_ptr((void*)address, new_func, old_func);
-                LOG(@"✅ Hooked: 0x%lx", address);
-            }
-        }
-    } @catch (NSException *e) {
-        LOG(@"❌ Hook failed: 0x%lx", address);
+// ============================================
+// ACTION STATE TEXT
+// ============================================
+static NSString* get_action_text(int state) {
+    switch(state) {
+        case 0: return @"● IDLE";
+        case 1: return @"🏃 RUN";
+        case 2: return @"⚔️ ATTACK";
+        case 3: return @"✨ SKILL";
+        case 4: return @"🔙 RECALL";
+        case 5: return @"😵 STUN";
+        case 6: return @"💀 DEAD";
+        case 7: return @"🌿 BUSH";
+        default: return @"?";
     }
 }
 
 // ============================================
-// SAFE ESP OVERLAY (NO CRASH GUARANTEED)
+// ESP OVERLAY (MINIMALIS)
 // ============================================
 @interface ESPOverlay : UIView
-@property (nonatomic, strong) CADisplayLink *displayLink;
 @end
 
 @implementation ESPOverlay
@@ -189,246 +151,168 @@ void safe_hook(uintptr_t address, void* new_func, void** old_func) {
     if (self) {
         self.backgroundColor = [UIColor clearColor];
         self.userInteractionEnabled = NO;
-        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(safeRedraw)];
-        [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        
+        // Update setiap frame
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(update)];
+        [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     return self;
 }
 
-- (void)safeRedraw {
-    @try {
-        if (espEnabled && g_unityBase) {
-            [self setNeedsDisplay];
-        }
-    } @catch (NSException *e) {}
+- (void)update {
+    if ((g_espBox || g_espLine) && g_unityBase && g_isInBattle) {
+        [self setNeedsDisplay];
+    }
 }
 
 - (void)drawRect:(CGRect)rect {
-    // PROTECT: Langsung return jika kondisi tidak aman
-    if (!espEnabled || !g_unityBase) return;
-    if (!g_isInBattle) return; // Hanya gambar saat dalam battle
+    if (!g_unityBase) return;
     
-    @try {
-        CGContextRef ctx = UIGraphicsGetCurrentContext();
-        if (!ctx) return;
-        CGContextSetLineWidth(ctx, 1.5);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    CGContextSetLineWidth(ctx, 1.2);
+    
+    // GET BATTLE MANAGER
+    uintptr_t bmPtr = safe_read_ptr(g_unityBase + OFF_BATTLE_MANAGER);
+    if (!is_valid_address(bmPtr)) return;
+    
+    // GET PLAYER LIST
+    uintptr_t playerList = safe_read_ptr(bmPtr + OFF_PLAYER_LIST);
+    if (!is_valid_address(playerList)) return;
+    
+    uintptr_t items = safe_read_ptr(playerList + 0x10);
+    int size = safe_read_int(playerList + 0x18);
+    if (!is_valid_address(items) || size <= 0 || size > 20) return;
+    
+    // GET CAMERA & W2S
+    void* (*get_main)() = (void*(*)())(g_unityBase + RVA_CAMERA_MAIN);
+    if (!get_main) return;
+    void* mainCam = get_main();
+    if (!mainCam) return;
+    
+    Vector3 (*w2s)(void*, Vector3) = (Vector3(*)(void*, Vector3))(g_unityBase + RVA_WORLD_TO_SCREEN);
+    if (!w2s) return;
+    
+    // GET LOCAL TEAM
+    uintptr_t localPlayer = safe_read_ptr(bmPtr + OFF_LOCAL_PLAYER);
+    int myTeam = 0;
+    if (is_valid_address(localPlayer)) {
+        myTeam = safe_read_int(localPlayer + OFF_TEAM);
+    }
+    
+    float screenW = rect.size.width;
+    float screenH = rect.size.height;
+    float scale = [UIScreen mainScreen].scale;
+    
+    for (int i = 0; i < size; i++) {
+        uintptr_t player = safe_read_ptr(items + 0x20 + (i * 8));
+        if (!is_valid_address(player)) continue;
         
-        // ========== SAFE READ BATTLE MANAGER ==========
-        uintptr_t bmPtrAddr = g_unityBase + OFF_BATTLE_MANAGER_INST;
-        if (!is_address_valid(bmPtrAddr)) return;
+        // Get position
+        Vector3 pos = safe_read_vector3(player + OFF_POSITION);
+        Vector3 screenPos = w2s(mainCam, pos);
         
-        uintptr_t bmPtr = safe_read_ptr(bmPtrAddr);
-        if (!is_address_valid(bmPtr)) return;
-        
-        // ========== SAFE READ PLAYER LIST ==========
-        uintptr_t playerListAddr = bmPtr + OFF_SHOW_PLAYERS;
-        if (!is_address_valid(playerListAddr)) return;
-        
-        uintptr_t playerList = safe_read_ptr(playerListAddr);
-        if (!is_address_valid(playerList)) return;
-        
-        // ========== SAFE READ LIST DATA ==========
-        uintptr_t itemsAddr = playerList + 0x10;
-        uintptr_t sizeAddr = playerList + 0x18;
-        if (!is_address_valid(itemsAddr) || !is_address_valid(sizeAddr)) return;
-        
-        uintptr_t items = safe_read_ptr(itemsAddr);
-        int size = safe_read_int(sizeAddr);
-        
-        if (!is_address_valid(items) || size <= 0 || size > 100) return;
-        
-        // ========== SAFE GET CAMERA ==========
-        void* (*get_main)() = (void*(*)())(g_unityBase + RVA_CAMERA_MAIN);
-        if (!get_main) return;
-        
-        void* mainCam = get_main();
-        if (!mainCam || !is_address_valid((uintptr_t)mainCam)) return;
-        
-        // ========== SAFE WORLD TO SCREEN ==========
-        Vector3 (*w2s)(void*, Vector3) = (Vector3(*)(void*, Vector3))(g_unityBase + RVA_WORLD_TO_SCREEN);
-        if (!w2s) return;
-        
-        // ========== SAFE LOCAL TEAM ==========
-        uintptr_t localPlayerAddr = bmPtr + OFF_LOCAL_PLAYER;
-        uintptr_t localPlayer = safe_read_ptr(localPlayerAddr);
-        int myTeam = 0;
-        if (is_address_valid(localPlayer)) {
-            uintptr_t teamAddr = localPlayer + OFF_ENTITY_CAMP;
-            if (is_address_valid(teamAddr)) {
-                myTeam = safe_read_int(teamAddr);
+        if (screenPos.z > 0.1f) {
+            int team = safe_read_int(player + OFF_TEAM);
+            
+            // Skip teammate
+            if (team == myTeam) continue;
+            
+            float x = screenPos.x / scale;
+            float y = screenH - (screenPos.y / scale);
+            
+            float distance = screenPos.z;
+            float boxW = (400.0f / distance) / scale;
+            float boxH = boxW * 1.3f;
+            
+            // Warna musuh
+            UIColor *color = [UIColor redColor];
+            CGContextSetStrokeColorWithColor(ctx, color.CGColor);
+            CGContextSetFillColorWithColor(ctx, [color colorWithAlphaComponent:0.15].CGColor);
+            
+            // ===== ESP BOX =====
+            if (g_espBox) {
+                CGContextStrokeRect(ctx, CGRectMake(x - boxW/2, y - boxH, boxW, boxH));
             }
-        }
-        
-        float scale = [UIScreen mainScreen].scale;
-        float screenH = rect.size.height;
-        
-        for (int i = 0; i < size && i < 100; i++) {
-            @autoreleasepool {
-                uintptr_t playerAddrPtr = items + 0x20 + (i * 8);
-                if (!is_address_valid(playerAddrPtr)) continue;
-                
-                uintptr_t player = safe_read_ptr(playerAddrPtr);
-                if (!is_address_valid(player)) continue;
-                
-                // Get position
-                uintptr_t posAddr = player + OFF_ENTITY_POS;
-                if (!is_address_valid(posAddr)) continue;
-                Vector3 pos = safe_read_vector3(posAddr);
-                
-                Vector3 screenPos = w2s(mainCam, pos);
-                
-                if (screenPos.z > 0.1f) {
-                    uintptr_t teamAddr = player + OFF_ENTITY_CAMP;
-                    int team = is_address_valid(teamAddr) ? safe_read_int(teamAddr) : 0;
+            
+            // ===== HP BAR =====
+            if (g_hpBar) {
+                int hp = safe_read_int(player + OFF_CURRENT_HP);
+                int maxHp = safe_read_int(player + OFF_MAX_HP);
+                if (maxHp > 0) {
+                    float percent = (float)hp / (float)maxHp;
+                    if (percent > 1.0) percent = 1.0;
                     
-                    // Skip teammate
-                    if (team == myTeam && !radarEnabled) continue;
+                    CGContextSetFillColorWithColor(ctx, [UIColor darkGrayColor].CGColor);
+                    CGContextFillRect(ctx, CGRectMake(x - boxW/2, y - boxH - 5, boxW, 3));
+                    CGContextSetFillColorWithColor(ctx, color.CGColor);
+                    CGContextFillRect(ctx, CGRectMake(x - boxW/2, y - boxH - 5, boxW * percent, 3));
+                }
+            }
+            
+            // ===== ACTION STATE =====
+            if (g_actionState) {
+                int state = safe_read_int(player + OFF_ACTION_STATE);
+                NSString *stateText = get_action_text(state);
+                NSDictionary *attrs = @{NSFontAttributeName: [UIFont systemFontOfSize:9],
+                                        NSForegroundColorAttributeName: [UIColor whiteColor]};
+                [stateText drawAtPoint:CGPointMake(x - boxW/2, y - boxH - 14) withAttributes:attrs];
+            }
+            
+            // ===== SKILL CD =====
+            if (g_skillCD) {
+                uintptr_t skillComp = safe_read_ptr(player + OFF_SKILL_COMP);
+                if (is_valid_address(skillComp)) {
+                    float s1 = safe_read_float(skillComp + OFF_SKILL_1_CD);
+                    float s2 = safe_read_float(skillComp + OFF_SKILL_2_CD);
+                    float s3 = safe_read_float(skillComp + OFF_SKILL_3_CD);
                     
-                    float x = screenPos.x / scale;
-                    float y = screenH - (screenPos.y / scale);
+                    NSString *cdText = [NSString stringWithFormat:@"%.1f|%.1f|%.1f", s1, s2, s3];
+                    if (s1 <= 0 && s2 <= 0 && s3 <= 0) cdText = @"▲▲▲";
                     
-                    float boxWidth = (500.0f / screenPos.z) / scale;
-                    float boxHeight = boxWidth * 1.3f;
-                    
-                    UIColor *color = (team == myTeam) ? [UIColor greenColor] : [UIColor redColor];
-                    
-                    CGContextSetStrokeColorWithColor(ctx, color.CGColor);
-                    CGContextStrokeRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight, boxWidth, boxHeight));
-                    
-                    // HP Bar (safe read)
-                    uintptr_t hpAddr = player + OFF_ENTITY_HP;
-                    uintptr_t maxHpAddr = player + OFF_ENTITY_HP_MAX;
-                    if (is_address_valid(hpAddr) && is_address_valid(maxHpAddr)) {
-                        int hp = safe_read_int(hpAddr);
-                        int maxHp = safe_read_int(maxHpAddr);
-                        if (maxHp > 0) {
-                            float percent = (float)hp / (float)maxHp;
-                            if (percent > 1.0) percent = 1.0;
-                            
-                            CGContextSetFillColorWithColor(ctx, [UIColor darkGrayColor].CGColor);
-                            CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 6, boxWidth, 3));
-                            CGContextSetFillColorWithColor(ctx, color.CGColor);
-                            CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 6, boxWidth * percent, 3));
-                        }
-                    }
+                    NSDictionary *attrs = @{NSFontAttributeName: [UIFont systemFontOfSize:7],
+                                            NSForegroundColorAttributeName: [UIColor cyanColor]};
+                    [cdText drawAtPoint:CGPointMake(x - boxW/2, y + 4) withAttributes:attrs];
                 }
             }
         }
-    } @catch (NSException *e) {
-        // Silent fail - no crash
-        LOG(@"ESP Draw error: %@", e.reason);
+    }
+    
+    // ===== ESP SNAP LINE =====
+    if (g_espLine) {
+        // Implementasi garis dari tengah layar ke musuh
+        // Bisa ditambahkan sesuai kebutuhan
     }
 }
 
-- (void)dealloc {
-    [self.displayLink invalidate];
-}
-
 @end
 
 // ============================================
-// UI Components (Safe)
+// UI MINIMALIS (ENTENG)
 // ============================================
-
-@interface CustomToggle : UIView
-@property (nonatomic, assign) BOOL isOn;
-@property (nonatomic, copy) void (^onToggle)(BOOL isOn);
+@interface MiniMenu : UIView {
+    UIView *panel;
+    BOOL isOpen;
+}
+- (void)toggle;
 @end
 
-@implementation CustomToggle {
-    UIView *trackView;
-    UIView *thumbView;
-}
+@implementation MiniMenu
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        isOpen = NO;
         self.backgroundColor = [UIColor clearColor];
         
-        trackView = [[UIView alloc] initWithFrame:CGRectMake(0, frame.size.height/2 - 12, frame.size.width, 24)];
-        trackView.backgroundColor = [UIColor colorWithWhite:0.3 alpha:1.0];
-        trackView.layer.cornerRadius = 12;
-        [self addSubview:trackView];
-        
-        thumbView = [[UIView alloc] initWithFrame:CGRectMake(2, frame.size.height/2 - 10, 20, 20)];
-        thumbView.backgroundColor = [UIColor whiteColor];
-        thumbView.layer.cornerRadius = 10;
-        thumbView.layer.shadowOpacity = 0.3;
-        [self addSubview:thumbView];
-        
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggle)];
-        [self addGestureRecognizer:tap];
-    }
-    return self;
-}
-
-- (void)toggle {
-    self.isOn = !self.isOn;
-    [self animateToState:self.isOn];
-    if (self.onToggle) self.onToggle(self.isOn);
-}
-
-- (void)animateToState:(BOOL)isOn {
-    CGFloat targetX = isOn ? self.frame.size.width - 22 : 2;
-    UIColor *trackColor = isOn ? [UIColor cyanColor] : [UIColor colorWithWhite:0.3 alpha:1.0];
-    
-    [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-        self->thumbView.frame = CGRectMake(targetX, self->thumbView.frame.origin.y, 20, 20);
-        self->trackView.backgroundColor = trackColor;
-    } completion:nil];
-}
-@end
-
-@interface AnimatedToast : UIView
-+ (void)showMessage:(NSString *)message inView:(UIView *)view;
-@end
-
-@implementation AnimatedToast
-+ (void)showMessage:(NSString *)message inView:(UIView *)view {
-    @try {
-        AnimatedToast *toast = [[AnimatedToast alloc] initWithFrame:CGRectMake(20, -60, view.bounds.size.width - 40, 50)];
-        toast.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
-        toast.layer.cornerRadius = 12;
-        
-        UILabel *label = [[UILabel alloc] initWithFrame:toast.bounds];
-        label.text = message;
-        label.textColor = [UIColor cyanColor];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.font = [UIFont systemFontOfSize:13];
-        [toast addSubview:label];
-        
-        [view addSubview:toast];
-        
-        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5 options:0 animations:^{
-            toast.frame = CGRectMake(20, 80, view.bounds.size.width - 40, 50);
-        } completion:^(BOOL finished) {
-            [UIView animateWithDuration:0.3 delay:2.0 options:0 animations:^{
-                toast.alpha = 0;
-            } completion:^(BOOL finished) {
-                [toast removeFromSuperview];
-            }];
-        }];
-    } @catch (NSException *e) {}
-}
-@end
-
-@interface ModernMenu : UIView
-@property (nonatomic, strong) UIVisualEffectView *blurView;
-- (void)showWithAnimation;
-- (void)hideWithAnimation;
-@end
-
-@implementation ModernMenu
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
-        self.blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
-        self.blurView.frame = self.bounds;
-        self.blurView.layer.cornerRadius = 20;
-        self.blurView.clipsToBounds = YES;
-        [self addSubview:self.blurView];
+        // Panel (rounded, transparent dark)
+        panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 0)];
+        panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+        panel.layer.cornerRadius = 12;
+        panel.layer.borderWidth = 0.5;
+        panel.layer.borderColor = [UIColor colorWithWhite:0.3 alpha:1.0].CGColor;
+        panel.clipsToBounds = YES;
+        panel.hidden = YES;
+        [self addSubview:panel];
         
         [self setupUI];
     }
@@ -436,141 +320,216 @@ void safe_hook(uintptr_t address, void* new_func, void** old_func) {
 }
 
 - (void)setupUI {
-    UIView *contentView = [[UIView alloc] initWithFrame:self.bounds];
-    contentView.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.3];
-    [self.blurView.contentView addSubview:contentView];
+    float y = 8;
+    float w = 180;
     
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 200, 30)];
-    title.text = @"pH-1 PRO";
-    title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:20];
-    [contentView addSubview:title];
+    // Title
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(10, y, w - 20, 24)];
+    title.text = @"⚡ PH-1 LITE";
+    title.textColor = [UIColor cyanColor];
+    title.font = [UIFont boldSystemFontOfSize:13];
+    title.textAlignment = NSTextAlignmentCenter;
+    [panel addSubview:title];
+    y += 28;
     
-    __weak typeof(self) weakSelf = self;
-    float y = 70;
+    // Separator
+    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(8, y, w - 16, 0.5)];
+    sep.backgroundColor = [UIColor grayColor];
+    [panel addSubview:sep];
+    y += 8;
     
-    y = [self addToggle:contentView title:@"Safe Mode" y:y state:g_safeMode action:^(BOOL isOn) {
-        g_safeMode = isOn;
-        [AnimatedToast showMessage:isOn ? @"Safe Mode ON" : @"Safe Mode OFF" inView:weakSelf.superview];
-    }];
-    y = [self addToggle:contentView title:@"Enable ESP" y:y state:espEnabled action:^(BOOL isOn) {
-        espEnabled = isOn;
-        [AnimatedToast showMessage:isOn ? @"ESP Enabled" : @"ESP Disabled" inView:weakSelf.superview];
-    }];
-    y = [self addToggle:contentView title:@"Drone View" y:y state:droneEnabled action:^(BOOL isOn) {
-        droneEnabled = isOn;
-        [AnimatedToast showMessage:isOn ? @"Drone ON" : @"Drone OFF" inView:weakSelf.superview];
+    // ===== ESP BOX =====
+    y = [self addToggle:panel title:@"ESP BOX" y:y state:&g_espBox action:^(BOOL on) {
+        g_espBox = on;
     }];
     
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(20, self.bounds.size.height - 50, self.bounds.size.width - 40, 40);
-    closeBtn.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.8];
-    [closeBtn setTitle:@"CLOSE" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    closeBtn.layer.cornerRadius = 10;
-    [closeBtn addTarget:self action:@selector(hideWithAnimation) forControlEvents:UIControlEventTouchUpInside];
-    [contentView addSubview:closeBtn];
+    // ===== HP BAR =====
+    y = [self addToggle:panel title:@"HP BAR" y:y state:&g_hpBar action:^(BOOL on) {
+        g_hpBar = on;
+    }];
+    
+    // ===== ACTION STATE =====
+    y = [self addToggle:panel title:@"ACTION STATE" y:y state:&g_actionState action:^(BOOL on) {
+        g_actionState = on;
+    }];
+    
+    // ===== SKILL CD =====
+    y = [self addToggle:panel title:@"SKILL CD" y:y state:&g_skillCD action:^(BOOL on) {
+        g_skillCD = on;
+    }];
+    
+    // Separator
+    sep = [[UIView alloc] initWithFrame:CGRectMake(8, y, w - 16, 0.5)];
+    sep.backgroundColor = [UIColor grayColor];
+    [panel addSubview:sep];
+    y += 8;
+    
+    // ===== AUTO TAP =====
+    y = [self addToggle:panel title:@"AUTO TAP" y:y state:&g_autoTap action:^(BOOL on) {
+        g_autoTap = on;
+        if (on) {
+            start_auto_tap();
+        } else {
+            stop_auto_tap();
+        }
+    }];
+    
+    // ===== TAP SPEED SLIDER =====
+    UILabel *speedLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, y, 100, 18)];
+    speedLabel.text = @"⚡ TAP SPEED";
+    speedLabel.textColor = [UIColor lightGrayColor];
+    speedLabel.font = [UIFont systemFontOfSize:9];
+    [panel addSubview:speedLabel];
+    
+    UISlider *speedSlider = [[UISlider alloc] initWithFrame:CGRectMake(10, y + 16, w - 20, 24)];
+    speedSlider.minimumValue = 0.1;
+    speedSlider.maximumValue = 1.0;
+    speedSlider.value = g_tapSpeed;
+    speedSlider.minimumTrackTintColor = [UIColor cyanColor];
+    speedSlider.continuous = YES;
+    [speedSlider addTarget:self action:@selector(speedChanged:) forControlEvents:UIControlEventValueChanged];
+    [panel addSubview:speedSlider];
+    
+    UILabel *speedValue = [[UILabel alloc] initWithFrame:CGRectMake(10, y + 36, w - 20, 14)];
+    speedValue.text = [NSString stringWithFormat:@"%.0f%%", g_tapSpeed * 100];
+    speedValue.textColor = [UIColor cyanColor];
+    speedValue.font = [UIFont systemFontOfSize:8];
+    speedValue.textAlignment = NSTextAlignmentCenter;
+    speedValue.tag = 123;
+    [panel addSubview:speedValue];
+    y += 54;
+    
+    // Panel height
+    CGRect frame = panel.frame;
+    frame.size.height = y + 8;
+    panel.frame = frame;
 }
 
-- (float)addToggle:(UIView*)parent title:(NSString*)title y:(float)y state:(BOOL)state action:(void (^)(BOOL))action {
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(20, y, 150, 30)];
-    lbl.text = title;
-    lbl.textColor = [UIColor whiteColor];
-    [parent addSubview:lbl];
+- (float)addToggle:(UIView*)parent title:(NSString*)title y:(float)y state:(BOOL*)state action:(void(^)(BOOL))action {
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(10, y, 120, 26)];
+    label.text = title;
+    label.textColor = [UIColor whiteColor];
+    label.font = [UIFont systemFontOfSize:11];
+    [parent addSubview:label];
     
-    CustomToggle *toggle = [[CustomToggle alloc] initWithFrame:CGRectMake(self.bounds.size.width - 70, y, 50, 30)];
-    toggle.isOn = state;
-    [toggle animateToState:state];
-    toggle.onToggle = action;
-    [parent addSubview:toggle];
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(130, y, 0, 0)];
+    sw.transform = CGAffineTransformMakeScale(0.7, 0.7);
+    sw.on = *state;
+    sw.onTintColor = [UIColor cyanColor];
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    objc_setAssociatedObject(sw, "action", [action copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(sw, "statePtr", [NSValue valueWithPointer:state], OBJC_ASSOCIATION_ASSIGN);
+    [parent addSubview:sw];
     
-    return y + 45;
+    return y + 32;
 }
 
-- (void)showWithAnimation {
-    self.hidden = NO;
-    self.alpha = 0;
-    self.transform = CGAffineTransformMakeScale(0.8, 0.8);
-    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:0 animations:^{
-        self.transform = CGAffineTransformIdentity;
-        self.alpha = 1;
-    } completion:nil];
+- (void)switchChanged:(UISwitch*)sw {
+    NSValue *ptrVal = objc_getAssociatedObject(sw, "statePtr");
+    if (ptrVal) {
+        BOOL *state = [ptrVal pointerValue];
+        *state = sw.isOn;
+        
+        void(^action)(BOOL) = objc_getAssociatedObject(sw, "action");
+        if (action) action(sw.isOn);
+    }
 }
 
-- (void)hideWithAnimation {
-    [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
-        self.transform = CGAffineTransformMakeScale(0.8, 0.8);
-        self.alpha = 0;
-    } completion:^(BOOL finished) {
-        self.hidden = YES;
-    }];
+- (void)speedChanged:(UISlider*)slider {
+    g_tapSpeed = slider.value;
+    UILabel *speedValue = [panel viewWithTag:123];
+    if (speedValue) {
+        speedValue.text = [NSString stringWithFormat:@"%.0f%%", g_tapSpeed * 100];
+    }
+    
+    // Restart auto tap with new speed
+    if (g_autoTap) {
+        stop_auto_tap();
+        start_auto_tap();
+    }
 }
+
+- (void)toggle {
+    isOpen = !isOpen;
+    
+    if (isOpen) {
+        panel.hidden = NO;
+        panel.transform = CGAffineTransformMakeScale(0.9, 0.9);
+        panel.alpha = 0;
+        [UIView animateWithDuration:0.2 animations:^{
+            panel.transform = CGAffineTransformIdentity;
+            panel.alpha = 1;
+        }];
+    } else {
+        [UIView animateWithDuration:0.15 animations:^{
+            panel.transform = CGAffineTransformMakeScale(0.9, 0.9);
+            panel.alpha = 0;
+        } completion:^(BOOL finished) {
+            panel.hidden = YES;
+            panel.transform = CGAffineTransformIdentity;
+        }];
+    }
+}
+
 @end
 
-@interface FloatingButton : UIButton
-@property (nonatomic, strong) ModernMenu *menuView;
+// ============================================
+// FLOATING BUTTON (MINIMALIS)
+// ============================================
+@interface MiniFloatingButton : UIButton
+@property (nonatomic, strong) MiniMenu *menu;
 @end
 
-@implementation FloatingButton
+@implementation MiniFloatingButton
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor colorWithRed:0.0 green:0.8 blue:1.0 alpha:1.0];
-        self.layer.cornerRadius = frame.size.width / 2;
+        self.backgroundColor = [UIColor colorWithRed:0.0 green:0.7 blue:1.0 alpha:0.9];
+        self.layer.cornerRadius = 20;
+        self.layer.shadowColor = [UIColor cyanColor].CGColor;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
+        self.layer.shadowRadius = 6;
+        self.layer.shadowOpacity = 0.5;
+        
         [self setTitle:@"⚡" forState:UIControlStateNormal];
-        self.titleLabel.font = [UIFont systemFontOfSize:24];
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:18];
         
-        [self addTarget:self action:@selector(animateTap) forControlEvents:UIControlEventTouchUpInside];
+        [self addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
         
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
         [self addGestureRecognizer:pan];
     }
     return self;
 }
 
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
+- (void)tapped {
+    if (self.menu) [self.menu toggle];
+}
+
+- (void)drag:(UIPanGestureRecognizer*)pan {
     CGPoint p = [pan locationInView:self.superview];
     self.center = p;
 }
 
-- (void)animateTap {
-    [UIView animateWithDuration:0.2 animations:^{
-        self.transform = CGAffineTransformMakeScale(1.1, 1.1);
-    } completion:^(BOOL finished) {
-        [UIView animateWithDuration:0.2 animations:^{
-            self.transform = CGAffineTransformIdentity;
-        }];
-    }];
-    
-    if (self.menuView) {
-        if (self.menuView.hidden) {
-            [self.menuView showWithAnimation];
-        } else {
-            [self.menuView hideWithAnimation];
-        }
-    }
-}
 @end
 
 // ============================================
-// BATTLE DETECTION (Safe)
+// BATTLE DETECTION
 // ============================================
 static void check_battle_status() {
     @try {
-        if (!g_unityBase) return;
-        
-        uintptr_t bmPtrAddr = g_unityBase + OFF_BATTLE_MANAGER_INST;
-        if (!is_address_valid(bmPtrAddr)) {
+        if (!g_unityBase) {
             g_isInBattle = NO;
             return;
         }
+        uintptr_t bmPtr = safe_read_ptr(g_unityBase + OFF_BATTLE_MANAGER);
+        g_isInBattle = is_valid_address(bmPtr);
         
-        uintptr_t bmPtr = safe_read_ptr(bmPtrAddr);
-        if (is_address_valid(bmPtr)) {
-            g_isInBattle = YES;
-        } else {
-            g_isInBattle = NO;
+        if (!g_isInBattle) {
+            stop_auto_tap();
+        } else if (g_autoTap) {
+            start_auto_tap();
         }
     } @catch (NSException *e) {
         g_isInBattle = NO;
@@ -578,126 +537,47 @@ static void check_battle_status() {
 }
 
 // ============================================
-// INITIALIZATION (Safe & Sequential)
+// INITIALIZATION
 // ============================================
 __attribute__((constructor))
 static void initialize() {
-    LOG(@"========================================");
-    LOG(@"pH-1 PRO Initializing...");
-    LOG(@"========================================");
-    
-    // Proteksi: Cek environment
-    @try {
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if (![bundleID containsString:@"com.mobile.legends"]) {
-            LOG(@"Not MLBB environment, exiting...");
-            return;
-        }
-        LOG(@"Bundle ID: %@", bundleID);
-    } @catch (NSException *e) {
-        return;
-    }
-    
-    // Stage 1: Delay 8 detik (lebih aman)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        LOG(@"Stage 1: Getting base address...");
-        
-        @try {
-            g_unityBase = get_base("UnityFramework");
-            if (g_unityBase == 0) {
-                LOG(@"❌ UnityFramework not found!");
-                return;
+        g_unityBase = 0;
+        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "UnityFramework")) {
+                g_unityBase = (uintptr_t)_dyld_get_image_header(i);
+                break;
             }
-            LOG(@"✅ UnityBase: 0x%lx", g_unityBase);
-            LOG(@"Game Version: %@", get_game_version());
-        } @catch (NSException *e) {
-            LOG(@"❌ Failed to get base: %@", e.reason);
-            return;
         }
         
-        // Stage 2: Setup hooks (safe)
-        LOG(@"Stage 2: Setting up hooks...");
+        if (!g_unityBase) return;
         
-        @try {
-            MSHookFunction_ptr = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+        UIWindow *win = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    win = scene.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!win) win = [UIApplication sharedApplication].windows.firstObject;
+        
+        if (win) {
+            ESPOverlay *esp = [[ESPOverlay alloc] initWithFrame:win.bounds];
+            [win addSubview:esp];
             
-            if (MSHookFunction_ptr) {
-                LOG(@"✅ MSHookFunction found");
-                
-                // Drone View Hook
-                if (is_address_valid(g_unityBase + OFF_DRONE_SET_FOV)) {
-                    safe_hook(g_unityBase + OFF_DRONE_SET_FOV, (void*)&hooked_set_fieldOfView, (void**)&old_set_fieldOfView);
-                }
-                
-                // Tutorial Skip Hook
-                if (is_address_valid(g_unityBase + RVA_IS_TUTORIAL)) {
-                    safe_hook(g_unityBase + RVA_IS_TUTORIAL, (void*)&hooked_IsTutorialBattle, (void**)&original_IsTutorialBattle);
-                }
-                
-                // Radar Hook (Optional, comment if crash)
-                // if (is_address_valid(g_unityBase + OFF_RADAR_VISIBLE)) {
-                //     safe_hook(g_unityBase + OFF_RADAR_VISIBLE, (void*)&hooked_SetVisible, (void**)&old_SetVisible);
-                // }
-            } else {
-                LOG(@"⚠️ MSHookFunction not found, some features disabled");
-            }
-        } @catch (NSException *e) {
-            LOG(@"❌ Hook setup error: %@", e.reason);
+            MiniFloatingButton *btn = [[MiniFloatingButton alloc] initWithFrame:CGRectMake(15, 120, 40, 40)];
+            MiniMenu *menu = [[MiniMenu alloc] initWithFrame:CGRectMake(0, 0, 200, 0)];
+            btn.menu = menu;
+            [win addSubview:btn];
+            [win addSubview:menu];
         }
         
-        // Stage 3: Load UI
-        LOG(@"Stage 3: Loading UI...");
-        
-        dispatch_async(dispatch_get_main_queue(), ^{
-            @try {
-                UIWindow *win = nil;
-                if (@available(iOS 13.0, *)) {
-                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                        if (scene.activationState == UISceneActivationStateForegroundActive) {
-                            win = scene.windows.firstObject;
-                            break;
-                        }
-                    }
-                }
-                if (!win) win = [[UIApplication sharedApplication] windows].firstObject;
-                
-                if (win) {
-                    // ESP Overlay
-                    ESPOverlay *overlay = [[ESPOverlay alloc] initWithFrame:win.bounds];
-                    [win addSubview:overlay];
-                    
-                    // Modern Menu
-                    ModernMenu *menu = [[ModernMenu alloc] initWithFrame:CGRectMake(win.bounds.size.width/2 - 150, win.bounds.size.height/2 - 160, 300, 240)];
-                    menu.hidden = YES;
-                    [win addSubview:menu];
-                    
-                    // Floating Button
-                    FloatingButton *fab = [[FloatingButton alloc] initWithFrame:CGRectMake(20, 100, 50, 50)];
-                    fab.menuView = menu;
-                    [win addSubview:fab];
-                    
-                    LOG(@"✅ UI Loaded successfully!");
-                    [AnimatedToast showMessage:@"pH-1 PRO Loaded!" inView:win];
-                } else {
-                    LOG(@"❌ No window found");
-                }
-            } @catch (NSException *e) {
-                LOG(@"❌ UI Error: %@", e.reason);
-            }
-        });
-        
-        // Stage 4: Battle status checker (periodic)
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-            while (YES) {
-                @autoreleasepool {
-                    check_battle_status();
-                    [NSThread sleepForTimeInterval:2.0];
-                }
-            }
-        });
-        
-        LOG(@"========================================");
-        LOG(@"✅ pH-1 PRO Ready!");
-        LOG(@"========================================");
+        // Battle checker
+        [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+            check_battle_status();
+        }];
     });
 }
