@@ -30,31 +30,41 @@ void add_log(NSString *msg) {
 // ============================================
 // OFFSETS (FROM DUMP.CS)
 // ============================================
-
-#define OFF_BATTLE_MANAGER_INST 0xADC8A0   // Static Field
-#define OFF_SHOW_PLAYERS        0x78        // List<ShowEntity>
-#define OFF_LOCAL_PLAYER        0x50        // ShowPlayer
-#define OFF_ENTITY_POS          0x30        // Vector3 (m_vPosition)
-#define OFF_ENTITY_CAMP         0xD8        // int (m_EntityCampType)
-#define OFF_ENTITY_HP           0x1AC       // int (m_Hp)
-#define OFF_ENTITY_HP_MAX       0x1B0       // int (m_HpMax)
-#define OFF_ENTITY_SHIELD       0x1B8       // m_MechArmorHp
-#define OFF_PLAYER_HERO_NAME    0x918       // UnityString (m_HeroName)
-#define RVA_WORLD_TO_SCREEN     0x89FE040   // Camera.WorldToScreenPoint
-#define RVA_CAMERA_MAIN         0x89FF130   // Camera.get_main
+#define OFF_BATTLE_MANAGER_INST 0xADC8A0   
+#define OFF_SHOW_PLAYERS        0x78        
+#define OFF_LOCAL_PLAYER        0x50        
+#define OFF_ENTITY_POS          0x30        
+#define OFF_ENTITY_CAMP         0xD8        
+#define OFF_ENTITY_HP           0x1AC       
+#define OFF_ENTITY_HP_MAX       0x1B0       
+#define OFF_ENTITY_SHIELD       0x1B8       
+#define OFF_PLAYER_HERO_NAME    0x918       
+#define RVA_WORLD_TO_SCREEN     0x89FE040   
+#define RVA_CAMERA_MAIN         0x89FF130   
 
 #define RVA_SDK_REPORT_LOG      0x4CEB580
 #define RVA_SDK_REPORT_ERR      0x4CEB690
 #define RVA_SDK_SEND_STEP       0x4CEB7A0
 
-// Existing legacy offsets
 #define OFF_DRONE_SET_FOV       0x89FB2B8
 #define OFF_RADAR_VISIBLE       0x5023FF0
 
 // ============================================
-// SECURITY & UTILITY
+// GLOBAL TOGGLES
 // ============================================
+static BOOL espEnabled = YES;
+static BOOL lineEnabled = YES;
+static BOOL hpBarEnabled = YES;
+static BOOL distEnabled = YES;
+static BOOL antiReport = YES;
+static BOOL autoDelete = YES;
+static BOOL radarEnabled = YES;
+static BOOL droneEnabled = NO;
+static float droneFov = 70.0;
 
+// ============================================
+// SECURITY & HOOKS
+// ============================================
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 static MSHookFunction_t MSHookFunction_ptr = NULL;
 static uintptr_t g_unityBase = 0;
@@ -72,39 +82,8 @@ void self_destruct() {
     exit(0);
 }
 
-void safe_hook(uintptr_t address, void* new_func, void** old_func) {
-    if (MSHookFunction_ptr && address > 0x1000) {
-        MSHookFunction_ptr((void*)address, new_func, old_func);
-    }
-}
-
-uintptr_t get_base(const char* name) {
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char* img_name = _dyld_get_image_name(i);
-        if (img_name && strstr(img_name, name)) {
-            return (uintptr_t)_dyld_get_image_header(i);
-        }
-    }
-    return 0;
-}
-
-// ============================================
-// GLOBAL TOGGLES
-// ============================================
-static BOOL espEnabled = YES;
-static BOOL lineEnabled = YES;
-static BOOL hpBarEnabled = YES;
-static BOOL distEnabled = YES;
-static BOOL reportBypass = YES;
-static BOOL autoDelete = YES;
-static BOOL radarEnabled = YES;
-static BOOL droneEnabled = NO;
-static float droneFov = 70.0;
-
-// ============================================
-// HOOKS
-// ============================================
+static void (*old_ReportLog)(void* msg);
+static void hooked_ReportLog(void* msg) { if (antiReport) return; if (old_ReportLog) old_ReportLog(msg); }
 
 static void (*old_set_fieldOfView)(void* instance, float value);
 static void hooked_set_fieldOfView(void* instance, float value) {
@@ -118,11 +97,8 @@ static void hooked_SetVisible(void* instance, bool visible) {
     if (old_SetVisible) old_SetVisible(instance, visible);
 }
 
-static void (*old_ReportLog)(void* msg);
-static void hooked_ReportLog(void* msg) { if (reportBypass) return; if (old_ReportLog) old_ReportLog(msg); }
-
-static void (*old_GMBan)(ulong uid);
-static void hooked_GMBan(ulong uid) {
+static void (*old_GMBan)(unsigned long uid);
+static void hooked_GMBan(unsigned long uid) {
     if (autoDelete) self_destruct();
     if (old_GMBan) old_GMBan(uid);
 }
@@ -150,12 +126,10 @@ static void hooked_GMBan(ulong uid) {
 
 - (void)drawRect:(CGRect)rect {
     if (!espEnabled || !g_unityBase) return;
-    
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     
     uintptr_t bmPtr = *(uintptr_t*)(g_unityBase + OFF_BATTLE_MANAGER_INST);
     if (!bmPtr) return;
-    
     uintptr_t playerList = *(uintptr_t*)(bmPtr + OFF_SHOW_PLAYERS);
     if (!playerList) return;
     
@@ -168,7 +142,6 @@ static void hooked_GMBan(ulong uid) {
     if (!mainCam) return;
     
     Vector3 (*w2s)(void*, Vector3) = (Vector3(*)(void*, Vector3))(g_unityBase + RVA_WORLD_TO_SCREEN);
-    
     uintptr_t localPlayer = *(uintptr_t*)(bmPtr + OFF_LOCAL_PLAYER);
     int myTeam = localPlayer ? *(int*)(localPlayer + OFF_ENTITY_CAMP) : 0;
     
@@ -193,18 +166,15 @@ static void hooked_GMBan(ulong uid) {
             CGContextSetStrokeColorWithColor(ctx, color.CGColor);
             CGContextSetLineWidth(ctx, 1.5);
 
-            // 1. Box
             CGContextStrokeRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight, boxWidth, boxHeight));
             
-            // 2. Snaplines
             if (lineEnabled) {
-                CGContextSetStrokeColorWithColor(ctx, [[UIColor whiteColor] colorWithAlphaComponent:0.5].CGColor);
+                CGContextSetStrokeColorWithColor(ctx, [[UIColor whiteColor] colorWithAlphaComponent:0.4].CGColor);
                 CGContextMoveToPoint(ctx, rect.size.width/2, rect.size.height/2);
                 CGContextAddLineToPoint(ctx, x, y);
                 CGContextStrokePath(ctx);
             }
 
-            // 3. HP & Shield
             if (hpBarEnabled) {
                 int hp = *(int*)(player + OFF_ENTITY_HP);
                 int maxHp = *(int*)(player + OFF_ENTITY_HP_MAX);
@@ -213,33 +183,158 @@ static void hooked_GMBan(ulong uid) {
                 float shPct = (float)shield / (float)maxHp;
 
                 CGContextSetFillColorWithColor(ctx, [UIColor darkGrayColor].CGColor);
-                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 8, boxWidth, 4));
-                
+                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth, 4));
                 CGContextSetFillColorWithColor(ctx, (hpPct > 0.3) ? [UIColor greenColor].CGColor : [UIColor redColor].CGColor);
-                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 8, boxWidth * hpPct, 4));
-                
+                CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth * hpPct, 4));
                 if (shield > 0) {
-                    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.8 alpha:0.8].CGColor);
-                    CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 8, boxWidth * MIN(shPct, 1.0), 4));
+                    CGContextSetFillColorWithColor(ctx, [UIColor colorWithWhite:0.9 alpha:0.7].CGColor);
+                    CGContextFillRect(ctx, CGRectMake(x - boxWidth/2, y - boxHeight - 10, boxWidth * MIN(shPct, 1.0), 4));
                 }
             }
 
-            // 4. Distance
             if (distEnabled) {
                 NSString *distStr = [NSString stringWithFormat:@"%.0fm", screenPos.z];
-                [distStr drawAtPoint:CGPointMake(x + boxWidth/2 + 2, y - boxHeight) withAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:10]}];
+                [distStr drawAtPoint:CGPointMake(x + boxWidth/2 + 3, y - boxHeight) withAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont boldSystemFontOfSize:10]}];
             }
         }
     }
 }
 @end
 
-// ============================================
-// MENU & INITIALIZATION
-// ============================================
+@interface CustomToggle : UIView
+@property (nonatomic, assign) BOOL isOn;
+@property (nonatomic, copy) void (^onToggle)(BOOL isOn);
+- (void)animateToState:(BOOL)isOn;
+@end
 
-// ... (Rest of the menu UI code remains similar to existing, just add new toggles)
-// Simplified for brevity in this scratch version
+@implementation CustomToggle { UIView *track; UIView *thumb; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        track = [[UIView alloc] initWithFrame:CGRectMake(0, 4, 46, 22)];
+        track.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1.0];
+        track.layer.cornerRadius = 11;
+        [self addSubview:track];
+        thumb = [[UIView alloc] initWithFrame:CGRectMake(2, 6, 18, 18)];
+        thumb.backgroundColor = [UIColor whiteColor];
+        thumb.layer.cornerRadius = 9;
+        [self addSubview:thumb];
+        [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped)]];
+    }
+    return self;
+}
+- (void)tapped { self.isOn = !self.isOn; [self animateToState:self.isOn]; if (self.onToggle) self.onToggle(self.isOn); }
+- (void)animateToState:(BOOL)isOn {
+    [UIView animateWithDuration:0.3 animations:^{
+        self->thumb.frame = CGRectMake(isOn ? 26 : 2, 6, 18, 18);
+        self->track.backgroundColor = isOn ? [UIColor cyanColor] : [UIColor colorWithWhite:0.2 alpha:1.0];
+    }];
+}
+@end
+
+@interface ModernMenu : UIView
+- (void)show; - (void)hide;
+@end
+
+@implementation ModernMenu { UIView *content; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+        UIVisualEffectView *bg = [[UIVisualEffectView alloc] initWithEffect:blur];
+        bg.frame = self.bounds;
+        bg.layer.cornerRadius = 20;
+        bg.clipsToBounds = YES;
+        bg.layer.borderWidth = 1.5;
+        bg.layer.borderColor = [UIColor cyanColor].CGColor;
+        [self addSubview:bg];
+        
+        content = [[UIView alloc] initWithFrame:self.bounds];
+        [bg.contentView addSubview:content];
+        [self setupUI];
+    }
+    return self;
+}
+
+- (void)setupUI {
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 15, self.frame.size.width, 30)];
+    title.text = @"pH-1 PRO GANG";
+    title.textColor = [UIColor cyanColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.font = [UIFont fontWithName:@"AvenirNext-Bold" size:18];
+    [content addSubview:title];
+    
+    float y = 60;
+    y = [self addToggle:@"Enable ESP" y:y state:espEnabled action:^(BOOL isOn) { espEnabled = isOn; }];
+    y = [self addToggle:@"Snaplines" y:y state:lineEnabled action:^(BOOL isOn) { lineEnabled = isOn; }];
+    y = [self addToggle:@"HP & Shield" y:y state:hpBarEnabled action:^(BOOL isOn) { hpBarEnabled = isOn; }];
+    y = [self addToggle:@"Distance" y:y state:distEnabled action:^(BOOL isOn) { distEnabled = isOn; }];
+    y = [self addToggle:@"Anti-Report" y:y state:antiReport action:^(BOOL isOn) { antiReport = isOn; }];
+    y = [self addToggle:@"Auto Delete" y:y state:autoDelete action:^(BOOL isOn) { autoDelete = isOn; }];
+    
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(20, self.frame.size.height - 50, self.frame.size.width - 40, 35);
+    close.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.6];
+    [close setTitle:@"HIDE MENU" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    close.layer.cornerRadius = 10;
+    [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
+    [content addSubview:close];
+}
+
+- (float)addToggle:(NSString *)text y:(float)y state:(BOOL)state action:(void (^)(BOOL))action {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(20, y, 150, 30)];
+    lbl.text = text; lbl.textColor = [UIColor whiteColor]; lbl.font = [UIFont systemFontOfSize:14];
+    [content addSubview:lbl];
+    CustomToggle *t = [[CustomToggle alloc] initWithFrame:CGRectMake(self.frame.size.width - 66, y, 46, 30)];
+    t.isOn = state; [t animateToState:state]; t.onToggle = action;
+    [content addSubview:t];
+    return y + 40;
+}
+
+- (void)show { self.hidden = NO; self.alpha = 0; [UIView animateWithDuration:0.3 animations:^{ self.alpha = 1; }]; }
+- (void)hide { [UIView animateWithDuration:0.3 animations:^{ self.alpha = 0; } completion:^(BOOL f){ self.hidden = YES; }]; }
+@end
+
+@interface FloatingFab : UIButton
+@property (nonatomic, strong) ModernMenu *menu;
+@end
+@implementation FloatingFab
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = [UIColor cyanColor];
+        self.layer.cornerRadius = frame.size.width/2;
+        [self setTitle:@"P" forState:UIControlStateNormal];
+        [self addTarget:self action:@selector(tapped) forControlEvents:UIControlEventTouchUpInside];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
+        [self addGestureRecognizer:pan];
+    }
+    return self;
+}
+- (void)tapped { if (self.menu.hidden) [self.menu show]; else [self.menu hide]; }
+- (void)pan:(UIPanGestureRecognizer *)p { self.center = [p locationInView:self.superview]; }
+@end
+
+// ============================================
+// INITIALIZATION
+// ============================================
+uintptr_t get_base(const char* name) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char* img_name = _dyld_get_image_name(i);
+        if (img_name && strstr(img_name, name)) {
+            return (uintptr_t)_dyld_get_image_header(i);
+        }
+    }
+    return 0;
+}
+
+void safe_hook(uintptr_t address, void* new_func, void** old_func) {
+    if (MSHookFunction_ptr && address > 0x1000) {
+        MSHookFunction_ptr((void*)address, new_func, old_func);
+    }
+}
 
 __attribute__((constructor))
 static void initialize() {
@@ -252,10 +347,26 @@ static void initialize() {
         safe_hook(g_unityBase + RVA_SDK_REPORT_LOG, (void*)&hooked_ReportLog, (void**)&old_ReportLog);
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIWindow *win = [[UIApplication sharedApplication] keyWindow];
+            UIWindow *win = nil;
+            if (@available(iOS 13.0, *)) {
+                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if (scene.activationState == UISceneActivationStateForegroundActive) {
+                        win = scene.windows.firstObject;
+                        break;
+                    }
+                }
+            }
+            if (!win) win = [UIApplication sharedApplication].keyWindow;
+            if (!win) win = [UIApplication sharedApplication].windows.firstObject;
+            
             if (win) {
                 [win addSubview:[[ESPOverlay alloc] initWithFrame:win.bounds]];
-                // Add Menu Button...
+                ModernMenu *menu = [[ModernMenu alloc] initWithFrame:CGRectMake(win.bounds.size.width/2-110, win.bounds.size.height/2-175, 220, 350)];
+                menu.hidden = YES;
+                [win addSubview:menu];
+                FloatingFab *fab = [[FloatingFab alloc] initWithFrame:CGRectMake(50, 150, 50, 50)];
+                fab.menu = menu;
+                [win addSubview:fab];
             }
         });
     });
