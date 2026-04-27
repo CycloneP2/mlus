@@ -1,4 +1,4 @@
-name: Compile pH-1 Pro Dylib
+name: Compile MLBB Mod Dylib
 
 on:
   push:
@@ -38,26 +38,27 @@ jobs:
           #endif
           EOF
 
-      - name: Compile tweak to ph1mlbb.dylib
+      - name: Find and compile source file
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           
-          # Try different possible source file names
+          # Cari file source
           if [ -f "tweak.mm" ]; then
             SOURCE="tweak.mm"
-          elif [ -f "antigravity.mm" ]; then
-            SOURCE="antigravity.mm"
+          elif [ -f "mod.mm" ]; then
+            SOURCE="mod.mm"
+          elif [ -f "mlbb_mod.mm" ]; then
+            SOURCE="mlbb_mod.mm"
           elif [ -f "ph1pro.mm" ]; then
             SOURCE="ph1pro.mm"
-          elif [ -f "Tweak.xm" ]; then
-            SOURCE="Tweak.xm"
           else
-            echo "Error: No source file found!"
+            echo "Error: No source file found! (tweak.mm, mod.mm, mlbb_mod.mm, ph1pro.mm)"
             exit 1
           fi
           
-          echo "Compiling $SOURCE"
+          echo "✅ Compiling: $SOURCE"
           
+          # Compile ke dylib
           xcrun -sdk iphoneos clang++ \
             -dynamiclib \
             -arch arm64 \
@@ -71,7 +72,9 @@ jobs:
             -framework CoreGraphics \
             -framework QuartzCore \
             "$SOURCE" \
-            -o ph1mlbb.dylib
+            -o mlbb_mod.dylib
+          
+          echo "✅ Compile success!"
 
       - name: Sign dylib with entitlements
         run: |
@@ -94,21 +97,26 @@ jobs:
           </plist>
           EOF
           
-          ldid -Sentitlements.plist ph1mlbb.dylib
+          ldid -Sentitlements.plist mlbb_mod.dylib
+          echo "✅ Dylib signed!"
 
       - name: Verify dylib
         run: |
-          echo "=== File Info ==="
-          file ph1mlbb.dylib
           echo ""
-          echo "=== Load Commands ==="
-          otool -L ph1mlbb.dylib
+          echo "========== FILE INFO =========="
+          file mlbb_mod.dylib
           echo ""
-          echo "=== Architecture ==="
-          lipo -info ph1mlbb.dylib
+          echo "========== ARCHITECTURE =========="
+          lipo -info mlbb_mod.dylib
+          echo ""
+          echo "========== LOAD COMMANDS =========="
+          otool -L mlbb_mod.dylib | head -10
+          echo ""
+          echo "========== SIZE =========="
+          ls -lh mlbb_mod.dylib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aph1mlbb_dylib
-          path: ph1mlbb.dylib
+          name: mlbb_mod_dylib
+          path: mlbb_mod.dylib
